@@ -354,10 +354,10 @@ const estimateWorkHours = (commits, config = {}) => {
 
 /**
  * Filter commits by author identity.
- * mode: "all" → return everything, "me"/"us" → match against gitAuthors.identities
+ * Always filters by gitAuthors.identities when available, regardless of mode.
+ * Mode exists for future extensibility (me vs us distinction).
  */
-const filterByAuthor = (commits, gitAuthors, mode) => {
-  if (mode === "all") return commits;
+const filterByAuthor = (commits, gitAuthors) => {
   const identities = gitAuthors?.identities || [];
   if (identities.length === 0) return commits;
   return commits.filter((c) =>
@@ -2089,8 +2089,8 @@ function GitView({ data, addCommit, setData, showToast, importEstimatedSession, 
   // Filter commits by selected repo
   // Author-filtered commits (applied before repo filter)
   const authorFilteredCommits = useMemo(
-    () => filterByAuthor(data.commits, data.settings.gitAuthors, authorFilter),
-    [data.commits, data.settings.gitAuthors, authorFilter],
+    () => filterByAuthor(data.commits, data.settings.gitAuthors),
+    [data.commits, data.settings.gitAuthors],
   );
 
   // Repo + author filtered commits
@@ -2099,10 +2099,11 @@ function GitView({ data, addCommit, setData, showToast, importEstimatedSession, 
       ? authorFilteredCommits
       : authorFilteredCommits.filter((c) => c.repo === repoFilter);
 
-  // Author-filtered estimated sessions & by-repo grouping
+  // Author-filtered estimated sessions (newest first)
   const filteredEstimates = useMemo(
-    () => estimateWorkHours(filterByAuthor(data.commits, data.settings.gitAuthors, authorFilter)),
-    [data.commits, data.settings.gitAuthors, authorFilter],
+    () => estimateWorkHours(filterByAuthor(data.commits, data.settings.gitAuthors))
+      .sort((a, b) => b.start - a.start),
+    [data.commits, data.settings.gitAuthors],
   );
 
   const filteredEstimatesByRepo = useMemo(() => {
@@ -2113,7 +2114,12 @@ function GitView({ data, addCommit, setData, showToast, importEstimatedSession, 
       byRepo[repo].total += s.duration;
       byRepo[repo].sessions.push(s);
     });
-    return byRepo;
+    // Sort repos by most recent session first
+    return Object.fromEntries(
+      Object.entries(byRepo).sort(([, a], [, b]) =>
+        b.sessions[0].start - a.sessions[0].start,
+      ),
+    );
   }, [filteredEstimates]);
 
   // Unique repo names for filter dropdown (from all commits, not filtered)
