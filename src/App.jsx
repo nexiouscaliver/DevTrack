@@ -261,7 +261,6 @@ const DEFAULT_DATA = {
   commits: [],
   settings: {
     dailyGoal: 8,
-    idleMinutes: 10,
     trackedRepos: [],
   },
 };
@@ -291,6 +290,15 @@ const load = () => {
     if (!parsed.settings.trackedRepos) {
       parsed.settings.trackedRepos = [];
     }
+    // Migration: remove idle detection setting
+    if ("idleMinutes" in parsed.settings) {
+      delete parsed.settings.idleMinutes;
+    }
+    // Migration: add pauses array to old sessions
+    parsed.sessions = parsed.sessions.map((s) => ({
+      ...s,
+      pauses: s.pauses || [],
+    }));
     // Tag old commits as manual source
     parsed.commits = parsed.commits.map((c) => ({
       ...c,
@@ -324,12 +332,18 @@ export default function App() {
   const [view, setView] = useState("dashboard");
   const [activeSession, setActiveSession] = useState(() => {
     const d = load();
-    return (d?.sessions || []).find((s) => s.status === "running") || null;
+    return (d?.sessions || []).find((s) => s.status === "running" || s.status === "paused") || null;
   });
   const [elapsed, setElapsed] = useState(() => {
     const d = load();
-    const running = (d?.sessions || []).find((s) => s.status === "running");
-    return running ? Date.now() - running.start : 0;
+    const active = (d?.sessions || []).find((s) => s.status === "running" || s.status === "paused");
+    if (!active) return 0;
+    if (active.status === "paused") {
+      // Compute break elapsed for paused session
+      const currentPause = (active.pauses || []).find((p) => p.end === null);
+      return currentPause ? Date.now() - currentPause.start : 0;
+    }
+    return Date.now() - active.start;
   });
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -344,10 +358,22 @@ export default function App() {
     };
   }, [data]);
 
-  // Timer tick
+  // Timer tick — update every second while session is active (running or paused)
   useEffect(() => {
-    if (!activeSession || activeSession.status !== "running") return;
-    const tick = () => setElapsed(Date.now() - activeSession.start);
+    if (!activeSession || activeSession.status === "completed") return;
+    const tick = () => {
+      if (activeSession.status === "running") {
+        const paused = activeSession.pauses.reduce((s, p) => s + ((p.end || 0) - p.start), 0);
+        setElapsed(Date.now() - activeSession.start - paused);
+      } else if (activeSession.status === "paused") {
+        // Keep ticking so break elapsed updates
+        const completedPauses = activeSession.pauses
+          .filter((p) => p.end !== null)
+          .reduce((s, p) => s + (p.end - p.start), 0);
+        const currentPauseStart = activeSession.pauses[activeSession.pauses.length - 1]?.start || Date.now();
+        setElapsed(completedPauses + (Date.now() - currentPauseStart));
+      }
+    };
     tick();
     const id = setInterval(tick, 1000);
     return () => clearInterval(id);
@@ -371,25 +397,75 @@ export default function App() {
       tags,
       notes,
       status: "running",
+      pauses: [],
     };
     setActiveSession(session);
     setElapsed(0);
     setData((d) => ({ ...d, sessions: [...d.sessions, session] }));
-    showToast(`${type === "work" ? "Work" : "Break"} session started`);
+    showToast("Work session started");
   };
+
+  const pauseSession = useCallback(() => {
+    setActiveSession((current) => {
+      if (!current || current.status !== "running") return current;
+      const updated = {
+        ...current,
+        status: "paused",
+        pauses: [...current.pauses, { start: Date.now(), end: null }],
+      };
+      setData((d) => ({
+        ...d,
+        sessions: d.sessions.map((s) => (s.id === current.id ? updated : s)),
+      }));
+      showToast("Session paused — take a break!");
+      return updated;
+    });
+  }, [showToast]);
+
+  const resumeSession = useCallback(() => {
+    setActiveSession((current) => {
+      if (!current || current.status !== "paused") return current;
+      const now = Date.now();
+      const pauses = current.pauses.map((p, i) =>
+        i === current.pauses.length - 1 && p.end === null
+          ? { ...p, end: now }
+          : p,
+      );
+      const updated = { ...current, status: "running", pauses };
+      setData((d) => ({
+        ...d,
+        sessions: d.sessions.map((s) => (s.id === current.id ? updated : s)),
+      }));
+      showToast("Session resumed — back to work!");
+      return updated;
+    });
+  }, [showToast]);
+
 
   const stopSession = useCallback(() => {
     setActiveSession((current) => {
       if (!current) return null;
       const now = Date.now();
+      // Close any open pause
+      let pauses = current.pauses;
+      if (current.status === "paused" && pauses.length > 0) {
+        pauses = pauses.map((p, i) =>
+          i === pauses.length - 1 && p.end === null ? { ...p, end: now } : p,
+        );
+      }
+      const totalDuration = now - current.start;
+      const totalBreakTime = pauses.reduce((s, p) => s + ((p.end || now) - p.start), 0);
+      const totalWorkTime = totalDuration - totalBreakTime;
       const ended = {
         ...current,
         end: now,
-        duration: now - current.start,
+        duration: totalDuration,
+        totalWorkTime,
+        totalBreakTime,
+        pauses,
         status: "completed",
       };
       setData((d) => {
-        // Find commits made during this session's time window
         const sessionCommits = d.commits.filter(
           (c) =>
             c.timestamp >= current.start &&
@@ -406,34 +482,6 @@ export default function App() {
       return null;
     });
   }, [showToast]);
-
-  // Idle detection — auto-stop session after configured minutes
-  useEffect(() => {
-    const idleMs = (data.settings.idleMinutes || 0) * 60000;
-    if (!activeSession || idleMs === 0) return;
-
-    let lastActivity = Date.now();
-    let idleCheck;
-
-    const resetIdle = () => {
-      lastActivity = Date.now();
-    };
-
-    const events = ["mousemove", "keydown", "mousedown", "touchstart", "scroll"];
-    events.forEach((e) => window.addEventListener(e, resetIdle));
-
-    idleCheck = setInterval(() => {
-      if (Date.now() - lastActivity >= idleMs) {
-        stopSession();
-        showToast("Session auto-stopped due to inactivity", "error");
-      }
-    }, 30000);
-
-    return () => {
-      events.forEach((e) => window.removeEventListener(e, resetIdle));
-      clearInterval(idleCheck);
-    };
-  }, [activeSession, data.settings.idleMinutes, stopSession, showToast]);
 
   const deleteSession = (id) => {
     setData((d) => ({ ...d, sessions: d.sessions.filter((s) => s.id !== id) }));
@@ -465,16 +513,22 @@ export default function App() {
       (s) => s.status === "completed" && isToday(s.start),
     );
     const workToday = todaySessions.filter((s) => s.type === "work");
-    const totalToday = workToday.reduce((a, s) => a + s.duration, 0);
-    const breaksToday = todaySessions.filter((s) => s.type === "break");
-    const totalBreaks = breaksToday.reduce((a, s) => a + s.duration, 0);
+    const totalToday = workToday.reduce((a, s) => a + (s.totalWorkTime || s.duration), 0);
+    // Compute break time from pauses within work sessions + legacy break sessions
+    const breaksFromPauses = workToday.reduce((a, s) => {
+      const breakMs = (s.pauses || []).reduce((sum, p) => sum + ((p.end || 0) - p.start), 0);
+      return a + breakMs;
+    }, 0);
+    const legacyBreaks = todaySessions.filter((s) => s.type === "break");
+    const legacyBreakTime = legacyBreaks.reduce((a, s) => a + s.duration, 0);
+    const totalBreaks = breaksFromPauses + legacyBreakTime;
 
     // Weekly
     const weekAgo = now - 7 * 86400000;
     const weekSessions = data.sessions.filter(
       (s) => s.status === "completed" && s.start > weekAgo && s.type === "work",
     );
-    const totalWeek = weekSessions.reduce((a, s) => a + s.duration, 0);
+    const totalWeek = weekSessions.reduce((a, s) => a + (s.totalWorkTime || s.duration), 0);
 
     // Streaks - consecutive days with >= goal hours
     const goalMs = (data.settings.dailyGoal || 8) * 3600000;
@@ -491,7 +545,7 @@ export default function App() {
             s.start >= dayStart &&
             s.start < dayEnd,
         )
-        .reduce((a, s) => a + s.duration, 0);
+        .reduce((a, s) => a + (s.totalWorkTime || s.duration), 0);
       if (dayWork >= goalMs || (d === 0 && dayWork > 0)) {
         currentStreak++;
       } else if (currentStreak > 0) {
@@ -527,8 +581,21 @@ export default function App() {
             s.start >= dayStart &&
             s.start < dayEnd,
         )
-        .reduce((a, s) => a + s.duration, 0);
+        .reduce((a, s) => a + (s.totalWorkTime || s.duration), 0);
       const breaks = data.sessions
+        .filter(
+          (s) =>
+            s.status === "completed" &&
+            s.type === "work" &&
+            s.start >= dayStart &&
+            s.start < dayEnd,
+        )
+        .reduce((a, s) => {
+          const breakMs = (s.pauses || []).reduce((sum, p) => sum + ((p.end || 0) - p.start), 0);
+          return a + breakMs;
+        }, 0);
+      // Also count legacy break sessions
+      const legacyBreaks = data.sessions
         .filter(
           (s) =>
             s.status === "completed" &&
@@ -540,7 +607,7 @@ export default function App() {
       arr.push({
         day: dayName(dayStart),
         work: +(work / 3600000).toFixed(2),
-        breaks: +(breaks / 3600000).toFixed(2),
+        breaks: +((breaks + legacyBreaks) / 3600000).toFixed(2),
         date: dayStart,
       });
     }
@@ -633,11 +700,11 @@ export default function App() {
                 ))}
               </nav>
               {activeSession && (
-                <div className="p-3 rounded-xl bg-gradient-to-br from-emerald-500/20 to-teal-500/10 border border-emerald-500/30">
+                <div className={`p-3 rounded-xl border ${activeSession.status === "paused" ? "bg-gradient-to-br from-sky-500/20 to-blue-500/10 border-sky-500/30" : "bg-gradient-to-br from-emerald-500/20 to-teal-500/10 border-emerald-500/30"}`}>
                   <div className="flex items-center gap-2 mb-1">
-                    <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                    <span className="text-xs font-medium text-emerald-300 uppercase">
-                      {activeSession.type}
+                    <span className={`w-2 h-2 rounded-full ${activeSession.status === "paused" ? "bg-sky-400" : "bg-emerald-400 animate-pulse"}`} />
+                    <span className={`text-xs font-medium uppercase ${activeSession.status === "paused" ? "text-sky-300" : "text-emerald-300"}`}>
+                      {activeSession.status === "paused" ? "On Break" : "Working"}
                     </span>
                   </div>
                   <div className="font-mono text-xl font-bold">
@@ -691,11 +758,11 @@ export default function App() {
 
         {/* Mini timer */}
         {activeSession && (
-          <div className="p-3 rounded-xl bg-gradient-to-br from-emerald-500/20 to-teal-500/10 border border-emerald-500/30">
+          <div className={`p-3 rounded-xl border ${activeSession.status === "paused" ? "bg-gradient-to-br from-sky-500/20 to-blue-500/10 border-sky-500/30" : "bg-gradient-to-br from-emerald-500/20 to-teal-500/10 border-emerald-500/30"}`}>
             <div className="flex items-center gap-2 mb-1">
-              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-              <span className="text-xs font-medium text-emerald-300 uppercase">
-                {activeSession.type}
+              <span className={`w-2 h-2 rounded-full ${activeSession.status === "paused" ? "bg-sky-400" : "bg-emerald-400 animate-pulse"}`} />
+              <span className={`text-xs font-medium uppercase ${activeSession.status === "paused" ? "text-sky-300" : "text-emerald-300"}`}>
+                {activeSession.status === "paused" ? "On Break" : "Working"}
               </span>
             </div>
             <div className="font-mono text-xl font-bold">
@@ -703,7 +770,7 @@ export default function App() {
             </div>
             <button
               onClick={() => setView("timer")}
-              className="text-xs text-emerald-400 hover:text-emerald-300 mt-1"
+              className={`text-xs mt-1 ${activeSession.status === "paused" ? "text-sky-400 hover:text-sky-300" : "text-emerald-400 hover:text-emerald-300"}`}
             >
               View →
             </button>
@@ -736,6 +803,8 @@ export default function App() {
                 weeklyData={weeklyData}
                 activeSession={activeSession}
                 startSession={startSession}
+                pauseSession={pauseSession}
+                resumeSession={resumeSession}
                 setView={setView}
               />
             )}
@@ -745,7 +814,9 @@ export default function App() {
                 activeSession={activeSession}
                 elapsed={elapsed}
                 startSession={startSession}
-                pauseSession={stopSession}
+                pauseSession={pauseSession}
+                resumeSession={resumeSession}
+                stopSession={stopSession}
                 updateSession={updateSession}
                 data={data}
                 showToast={showToast}
@@ -796,6 +867,8 @@ function Dashboard({
   weeklyData,
   activeSession,
   startSession,
+  pauseSession,
+  resumeSession,
 }) {
   const goal = data.settings.dailyGoal || 8;
   const workedHrs = (stats.totalToday / 3600000).toFixed(1);
@@ -841,12 +914,14 @@ function Dashboard({
           </h1>
           <p className="text-stone-300 max-w-xl">
             {activeSession
-              ? `You're currently in a ${activeSession.type} session. Keep going!`
+              ? activeSession.status === "paused"
+                ? "You're on a break. Rest up and resume when you're ready."
+                : "You're working right now. Keep going!"
               : stats.sessionsToday === 0
                 ? "Ready to start a productive day? Hit the button below."
                 : `You've logged ${stats.sessionsToday} session${stats.sessionsToday > 1 ? "s" : ""} today totaling ${workedHrs}h.`}
           </p>
-          {!activeSession && (
+          {!activeSession ? (
             <div className="flex gap-3 mt-5">
               <button
                 onClick={() => startSession("work", [], "")}
@@ -854,12 +929,24 @@ function Dashboard({
               >
                 <Icon path={ICONS.play} size={16} /> Start Work
               </button>
-              <button
-                onClick={() => startSession("break", [], "")}
-                className="px-5 py-2.5 rounded-xl bg-stone-800 hover:bg-stone-700 font-medium flex items-center gap-2 active:scale-[0.98] transition-transform"
-              >
-                <Icon path={ICONS.coffee} size={16} /> Take a Break
-              </button>
+            </div>
+          ) : (
+            <div className="flex gap-3 mt-5">
+              {activeSession.status === "paused" ? (
+                <button
+                  onClick={resumeSession}
+                  className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-600 hover:to-teal-700 font-medium shadow-lg shadow-emerald-500/30 flex items-center gap-2 active:scale-[0.98] transition-transform"
+                >
+                  <Icon path={ICONS.play} size={16} /> Resume Work
+                </button>
+              ) : (
+                <button
+                  onClick={pauseSession}
+                  className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-sky-500 to-blue-600 hover:from-sky-600 hover:to-blue-700 font-medium shadow-lg shadow-sky-500/30 flex items-center gap-2 active:scale-[0.98] transition-transform"
+                >
+                  <Icon path={ICONS.pause} size={16} /> Take a Break
+                </button>
+              )}
             </div>
           )}
         </div>
@@ -1019,17 +1106,18 @@ function TimerView({
   elapsed,
   startSession,
   pauseSession,
+  resumeSession,
+  stopSession,
   updateSession,
   data,
   showToast,
 }) {
   const [tags, setTags] = useState(() => activeSession?.tags?.join(", ") || "");
   const [notes, setNotes] = useState(() => activeSession?.notes || "");
-  const [type, setType] = useState("work");
 
   const handleStart = () => {
     startSession(
-      type,
+      "work",
       tags
         .split(",")
         .map((t) => t.trim())
@@ -1052,6 +1140,28 @@ function TimerView({
     showToast("Notes saved");
   };
 
+  // Compute work elapsed when running (elapsed already excludes pauses via timer tick)
+  const workElapsed = activeSession?.status === "running" ? elapsed : 0;
+
+  // Compute break elapsed when paused (elapsed is break time via timer tick)
+  const breakElapsed = activeSession?.status === "paused" ? elapsed : 0;
+
+  // Total work time (frozen) when paused — pure computation from session data
+  const workElapsedFrozen = useMemo(() => {
+    if (!activeSession || activeSession.status !== "paused") return 0;
+    const completedPauses = (activeSession.pauses || [])
+      .filter((p) => p.end !== null)
+      .reduce((s, p) => s + (p.end - p.start), 0);
+    const currentPause = activeSession.pauses[activeSession.pauses.length - 1];
+    if (!currentPause) return 0;
+    // Work time = time from session start to when current pause began, minus completed pauses
+    return currentPause.start - activeSession.start - completedPauses;
+  }, [activeSession]);
+
+  const isPaused = activeSession?.status === "paused";
+  const isRunning = activeSession?.status === "running";
+  const displayWorkTime = isPaused ? workElapsedFrozen : (isRunning ? workElapsed : 0);
+
   const todaySessions = useMemo(
     () =>
       data.sessions.filter(
@@ -1064,33 +1174,35 @@ function TimerView({
     <div className="max-w-4xl mx-auto space-y-6">
       <div>
         <h2 className="text-2xl font-bold">Focus Timer</h2>
-        <p className="text-stone-400">Track your work with precision</p>
+        <p className="text-stone-400">One session. Pause when you need a break. Stop when you&apos;re done.</p>
       </div>
 
       <div className="bg-gradient-to-br from-stone-900 to-stone-900/50 border border-stone-800 rounded-2xl p-10 text-center">
+        {/* Status badge */}
+        {activeSession && (
+          <div className="mb-4">
+            <span className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-semibold uppercase tracking-wide ${
+              isPaused
+                ? "bg-sky-500/20 text-sky-300 border border-sky-500/30"
+                : "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
+            }`}>
+              <span className={`w-2 h-2 rounded-full ${isPaused ? "bg-sky-400" : "bg-emerald-400 animate-pulse"}`} />
+              {isPaused ? "On Break" : "Working"}
+            </span>
+          </div>
+        )}
+
         {/* Timer display */}
         <div className="relative inline-block mb-6">
-          <div className="w-48 h-48 sm:w-56 sm:h-56 md:w-64 md:h-64 rounded-full border-4 border-stone-800 flex items-center justify-center relative">
+          <div className={`w-48 h-48 sm:w-56 sm:h-56 md:w-64 md:h-64 rounded-full border-4 ${isPaused ? "border-sky-800/50" : "border-stone-800"} flex items-center justify-center relative`}>
             {activeSession && (
               <svg className="absolute inset-0 w-full h-full -rotate-90" viewBox="0 0 256 256">
-                {/* Background track */}
+                <circle cx="128" cy="128" r="124" fill="none" stroke="#292524" strokeWidth="4" />
                 <circle
-                  cx="128"
-                  cy="128"
-                  r="124"
-                  fill="none"
-                  stroke="#292524"
+                  cx="128" cy="128" r="124" fill="none"
+                  stroke={isPaused ? "url(#timerBreakGrad)" : "url(#timerGrad)"}
                   strokeWidth="4"
-                />
-                {/* Goal progress arc */}
-                <circle
-                  cx="128"
-                  cy="128"
-                  r="124"
-                  fill="none"
-                  stroke="url(#timerGrad)"
-                  strokeWidth="4"
-                  strokeDasharray={`${Math.min(((elapsed) / ((data.settings.dailyGoal || 8) * 3600000)) * 779, 779)} 779`}
+                  strokeDasharray={`${Math.min(((displayWorkTime) / ((data.settings.dailyGoal || 8) * 3600000)) * 779, 779)} 779`}
                   strokeLinecap="round"
                 />
                 <defs>
@@ -1098,37 +1210,52 @@ function TimerView({
                     <stop offset="0%" stopColor="#f59e0b" />
                     <stop offset="100%" stopColor="#f97316" />
                   </linearGradient>
+                  <linearGradient id="timerBreakGrad">
+                    <stop offset="0%" stopColor="#38bdf8" />
+                    <stop offset="100%" stopColor="#0ea5e9" />
+                  </linearGradient>
                 </defs>
               </svg>
             )}
             <div>
               <div className="font-mono text-4xl sm:text-5xl font-bold">
-                {formatDuration(activeSession ? elapsed : 0)}
+                {!activeSession ? "00:00:00" : formatDuration(displayWorkTime)}
               </div>
               <div className="text-xs uppercase tracking-widest text-stone-400 mt-2">
-                {activeSession ? activeSession.type : "Ready"}
+                {!activeSession ? "Ready" : isPaused ? "Work Time" : "Elapsed"}
               </div>
             </div>
           </div>
         </div>
 
+        {/* Break timer — shown when paused */}
+        {isPaused && (
+          <motion.div
+            initial={{ opacity: 0, y: -10 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="mb-6 p-4 rounded-xl bg-sky-500/10 border border-sky-500/20 inline-block"
+          >
+            <div className="flex items-center gap-2 justify-center mb-1">
+              <Icon path={ICONS.coffee} size={14} className="text-sky-400" />
+              <span className="text-xs text-sky-300 font-medium uppercase">Break Time</span>
+            </div>
+            <div className="font-mono text-2xl font-bold text-sky-300">
+              {formatDuration(breakElapsed)}
+            </div>
+          </motion.div>
+        )}
+
+        {/* Pauses taken indicator */}
+        {activeSession && (activeSession.pauses || []).filter((p) => p.end !== null).length > 0 && !isPaused && (
+          <div className="mb-4 text-xs text-stone-400">
+            {(activeSession.pauses || []).filter((p) => p.end !== null).length} break{(activeSession.pauses || []).filter((p) => p.end !== null).length !== 1 ? "s" : ""} taken today
+            {" "}({formatDuration((activeSession.pauses || []).filter((p) => p.end !== null).reduce((s, p) => s + (p.end - p.start), 0))} total)
+          </div>
+        )}
+
         {/* Controls */}
         {!activeSession ? (
           <div className="space-y-4 max-w-md mx-auto">
-            <div className="flex gap-2 bg-stone-800/50 p-1 rounded-xl">
-              <button
-                onClick={() => setType("work")}
-                className={`flex-1 py-2 rounded-lg font-medium text-sm flex items-center justify-center gap-2 ${type === "work" ? "bg-amber-500 text-white" : "text-stone-400"}`}
-              >
-                <Icon path={ICONS.briefcase} size={14} /> Work
-              </button>
-              <button
-                onClick={() => setType("break")}
-                className={`flex-1 py-2 rounded-lg font-medium text-sm flex items-center justify-center gap-2 ${type === "break" ? "bg-sky-500 text-white" : "text-stone-400"}`}
-              >
-                <Icon path={ICONS.coffee} size={14} /> Break
-              </button>
-            </div>
             <input
               value={tags}
               onChange={(e) => setTags(e.target.value)}
@@ -1146,7 +1273,7 @@ function TimerView({
               onClick={handleStart}
               className="w-full py-3 rounded-xl bg-gradient-to-r from-amber-500 to-orange-600 hover:from-amber-600 hover:to-orange-700 font-semibold flex items-center justify-center gap-2 shadow-lg shadow-amber-500/30 active:scale-[0.98] transition-transform"
             >
-              <Icon path={ICONS.play} size={18} /> Start Session
+              <Icon path={ICONS.play} size={18} /> Start Work Session
             </button>
           </div>
         ) : (
@@ -1165,21 +1292,39 @@ function TimerView({
               className="w-full px-4 py-2.5 bg-stone-800 border border-stone-700 rounded-xl text-sm focus:outline-none focus:border-amber-500 resize-none"
             />
             <div className="flex gap-2">
+              {isPaused ? (
+                <button
+                  onClick={resumeSession}
+                  className="flex-1 py-3 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-600 hover:to-teal-700 font-semibold flex items-center justify-center gap-2 shadow-lg shadow-emerald-500/30 active:scale-[0.98] transition-transform"
+                >
+                  <Icon path={ICONS.play} size={18} /> Resume Work
+                </button>
+              ) : (
+                <button
+                  onClick={pauseSession}
+                  className="flex-1 py-3 rounded-xl bg-gradient-to-r from-sky-500 to-blue-600 hover:from-sky-600 hover:to-blue-700 font-semibold flex items-center justify-center gap-2 shadow-lg shadow-sky-500/30 active:scale-[0.98] transition-transform"
+                >
+                  <Icon path={ICONS.pause} size={18} /> Take a Break
+                </button>
+              )}
               <button
-                onClick={pauseSession}
-                className="flex-1 py-3 rounded-xl bg-amber-500 hover:bg-amber-600 font-semibold flex items-center justify-center gap-2"
+                onClick={stopSession}
+                className="px-5 py-3 rounded-xl bg-stone-800 hover:bg-stone-700 font-semibold flex items-center justify-center gap-2 border border-stone-700"
               >
-                <Icon path={ICONS.stop} size={18} /> Stop Session
+                <Icon path={ICONS.stop} size={18} /> Finish
               </button>
               <button
                 onClick={saveSessionNotes}
                 className="px-5 py-3 rounded-xl bg-stone-800 hover:bg-stone-700 font-semibold flex items-center justify-center gap-2"
               >
-                <Icon path={ICONS.check} size={18} /> Save Notes
+                <Icon path={ICONS.check} size={18} />
               </button>
             </div>
             <p className="text-xs text-stone-400">
               Started at {formatTime(activeSession.start)}
+              {(activeSession.pauses || []).filter((p) => p.end !== null).length > 0 && (
+                <span> · {(activeSession.pauses || []).filter((p) => p.end !== null).length} break{(activeSession.pauses || []).filter((p) => p.end !== null).length !== 1 ? "s" : ""} taken</span>
+              )}
             </p>
           </div>
         )}
@@ -1194,61 +1339,75 @@ function TimerView({
           </p>
         ) : (
           <div className="space-y-2">
-            {todaySessions.map((s) => (
-              <div
-                key={s.id}
-                className="flex items-center gap-3 p-3 bg-stone-800/50 rounded-xl"
-              >
+            {todaySessions.map((s) => {
+              const breakCount = (s.pauses || []).filter((p) => p.end).length;
+              const breakTime = (s.pauses || []).reduce((sum, p) => sum + ((p.end || 0) - p.start), 0);
+              return (
                 <div
-                  className={`w-2 h-8 rounded ${s.type === "work" ? "bg-amber-400" : "bg-sky-400"}`}
-                />
-                <div className="flex-1">
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm font-medium">
-                      {s.notes || s.tags?.[0] || s.type}
-                    </span>
-                    {s.tags?.map((t) => (
-                      <span
-                        key={t}
-                        className="text-xs px-2 py-0.5 bg-stone-700 rounded-full text-stone-300"
-                      >
-                        {t}
+                  key={s.id}
+                  className="flex items-center gap-3 p-3 bg-stone-800/50 rounded-xl"
+                >
+                  <div className="w-2 h-8 rounded bg-amber-400" />
+                  <div className="flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-medium">
+                        {s.notes || s.tags?.[0] || s.type}
                       </span>
-                    ))}
-                  </div>
-                  <div className="text-xs text-stone-500">
-                    {formatTime(s.start)} - {formatTime(s.end)}
-                  </div>
-                  {s.commitIds?.length > 0 && (
-                    <div className="mt-1 space-y-0.5">
-                      {s.commitIds.slice(0, 3).map((sha) => {
-                        const commit = data.commits.find(
-                          (c) => c.sha === sha,
-                        );
-                        if (!commit) return null;
-                        return (
-                          <div
-                            key={sha}
-                            className="flex items-center gap-1.5 text-xs text-stone-400"
-                          >
-                            <Icon path={ICONS.gitCommit} size={10} />
-                            <span className="truncate">{commit.message}</span>
-                          </div>
-                        );
-                      })}
-                      {s.commitIds.length > 3 && (
-                        <span className="text-xs text-stone-500">
-                          +{s.commitIds.length - 3} more commits
+                      {s.tags?.map((t) => (
+                        <span
+                          key={t}
+                          className="text-xs px-2 py-0.5 bg-stone-700 rounded-full text-stone-300"
+                        >
+                          {t}
+                        </span>
+                      ))}
+                    </div>
+                    <div className="text-xs text-stone-500">
+                      {formatTime(s.start)} - {formatTime(s.end)}
+                      {breakCount > 0 && (
+                        <span className="text-sky-400/70 ml-2">
+                          · {breakCount} break{breakCount !== 1 ? "s" : ""} ({formatDuration(breakTime)})
                         </span>
                       )}
                     </div>
-                  )}
+                    {s.commitIds?.length > 0 && (
+                      <div className="mt-1 space-y-0.5">
+                        {s.commitIds.slice(0, 3).map((sha) => {
+                          const commit = data.commits.find(
+                            (c) => c.sha === sha,
+                          );
+                          if (!commit) return null;
+                          return (
+                            <div
+                              key={sha}
+                              className="flex items-center gap-1.5 text-xs text-stone-400"
+                            >
+                              <Icon path={ICONS.gitCommit} size={10} />
+                              <span className="truncate">{commit.message}</span>
+                            </div>
+                          );
+                        })}
+                        {s.commitIds.length > 3 && (
+                          <span className="text-xs text-stone-500">
+                            +{s.commitIds.length - 3} more commits
+                          </span>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                  <div className="text-right">
+                    <div className="font-mono text-sm">
+                      {formatDuration(s.totalWorkTime || s.duration)}
+                    </div>
+                    {breakTime > 0 && (
+                      <div className="text-xs text-stone-500">
+                        +{formatDuration(breakTime)} break
+                      </div>
+                    )}
+                  </div>
                 </div>
-                <div className="font-mono text-sm">
-                  {formatDuration(s.duration)}
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>
@@ -1300,7 +1459,7 @@ function SessionsView({ data, deleteSession, updateSession }) {
           className="flex-1 px-4 py-2.5 bg-stone-900 border border-stone-800 rounded-xl text-sm focus:outline-none focus:border-amber-500"
         />
         <div className="flex gap-1 bg-stone-900 border border-stone-800 p-1 rounded-xl">
-          {["all", "work", "break"].map((f) => (
+          {["all", "work"].map((f) => (
             <button
               key={f}
               onClick={() => setFilter(f)}
@@ -1331,7 +1490,7 @@ function SessionsView({ data, deleteSession, updateSession }) {
         {Object.entries(grouped).map(([date, sessions]) => {
           const dayWork = sessions
             .filter((s) => s.type === "work")
-            .reduce((a, s) => a + (s.duration || 0), 0);
+            .reduce((a, s) => a + (s.totalWorkTime || s.duration || 0), 0);
           return (
             <div key={date}>
               <div className="flex items-center justify-between mb-3">
@@ -1387,6 +1546,11 @@ function SessionsView({ data, deleteSession, updateSession }) {
                             <span className="text-xs text-stone-400">
                               {formatTime(s.start)} - {formatTime(s.end)}
                             </span>
+                            {(s.pauses || []).filter((p) => p.end).length > 0 && (
+                              <span className="text-xs text-sky-400/70">
+                                {(s.pauses || []).filter((p) => p.end).length} break{(s.pauses || []).filter((p) => p.end).length !== 1 ? "s" : ""}
+                              </span>
+                            )}
                             {s.tags?.map((t) => (
                               <span
                                 key={t}
@@ -1428,8 +1592,15 @@ function SessionsView({ data, deleteSession, updateSession }) {
                         </>
                       )}
                     </div>
-                    <div className="font-mono text-sm text-stone-300">
-                      {formatDuration(s.duration)}
+                    <div className="text-right">
+                      <div className="font-mono text-sm text-stone-300">
+                        {formatDuration(s.totalWorkTime || s.duration)}
+                      </div>
+                      {(s.pauses || []).filter((p) => p.end).length > 0 && (
+                        <div className="text-xs text-stone-500">
+                          +{formatDuration((s.pauses || []).reduce((sum, p) => sum + ((p.end || 0) - p.start), 0))} breaks
+                        </div>
+                      )}
                     </div>
                     {editingId === s.id ? (
                       <button
@@ -1939,7 +2110,7 @@ function AnalyticsView({ data }) {
             s.start >= dayStart &&
             s.start < dayEnd,
         )
-        .reduce((a, s) => a + s.duration, 0);
+        .reduce((a, s) => a + (s.totalWorkTime || s.duration), 0);
       arr.push({
         day:
           range === "week"
@@ -1970,7 +2141,7 @@ function AnalyticsView({ data }) {
       )
       .forEach((s) => {
         (s.tags || []).forEach((t) => {
-          tagBreakdown[t] = (tagBreakdown[t] || 0) + s.duration;
+          tagBreakdown[t] = (tagBreakdown[t] || 0) + (s.totalWorkTime || s.duration);
         });
       });
     const tagData = Object.entries(tagBreakdown).map(([name, value]) => ({
@@ -1988,7 +2159,7 @@ function AnalyticsView({ data }) {
       )
       .forEach((s) => {
         const h = new Date(s.start).getHours();
-        hourly[h] += s.duration;
+        hourly[h] += (s.totalWorkTime || s.duration);
       });
     const hourlyData = hourly.map((v, i) => ({
       hour: `${i}:00`,
@@ -2191,10 +2362,15 @@ function ExportView({ data, showToast }) {
         (s) => s.start >= dayStart && s.start < dayEnd,
       );
       const work = daySessions.filter((s) => s.type === "work");
-      const breaks = daySessions.filter((s) => s.type === "break");
       const firstStart = work[0]?.start;
       const lastEnd = work[work.length - 1]?.end;
-      const workHrs = work.reduce((a, s) => a + s.duration, 0) / 3600000;
+      const workHrs = work.reduce((a, s) => a + (s.totalWorkTime || s.duration), 0) / 3600000;
+      // Break hours from pauses within work sessions
+      const breakHrs = work.reduce((a, s) => {
+        const breakMs = (s.pauses || []).reduce((sum, p) => sum + ((p.end || 0) - p.start), 0);
+        return a + breakMs;
+      }, 0) / 3600000;
+      const totalBreaks = work.reduce((a, s) => a + (s.pauses || []).filter((p) => p.end).length, 0);
       const dayCommits = commits.filter(
         (c) => c.timestamp >= dayStart && c.timestamp < dayEnd,
       );
@@ -2205,11 +2381,9 @@ function ExportView({ data, showToast }) {
         "First Login": firstStart ? formatTime(firstStart) : "-",
         "Last Logout": lastEnd ? formatTime(lastEnd) : "-",
         Sessions: work.length,
-        Breaks: breaks.length,
+        Breaks: totalBreaks,
         "Work Hours": +workHrs.toFixed(2),
-        "Break Hours": +(
-          breaks.reduce((a, s) => a + s.duration, 0) / 3600000
-        ).toFixed(2),
+        "Break Hours": +breakHrs.toFixed(2),
         Commits: dayCommits.length,
         Notes: sanitizeCell(
           work
@@ -2221,15 +2395,22 @@ function ExportView({ data, showToast }) {
     }
 
     // Sheet 2: Detailed Intervals
-    const intervals = sessions.map((s) => ({
-      Date: formatDate(s.start),
-      "Start Time": formatTime(s.start),
-      "End Time": formatTime(s.end),
-      "Duration (min)": +((s.duration || 0) / 60000).toFixed(1),
-      Type: s.type,
-      Tags: sanitizeCell((s.tags || []).join(", ")),
-      Notes: sanitizeCell(s.notes || ""),
-    }));
+    const intervals = sessions.map((s) => {
+      const breakMs = (s.pauses || []).reduce((sum, p) => sum + ((p.end || 0) - p.start), 0);
+      const workMs = (s.totalWorkTime || s.duration || 0);
+      return {
+        Date: formatDate(s.start),
+        "Start Time": formatTime(s.start),
+        "End Time": formatTime(s.end),
+        "Total Duration (min)": +((s.duration || 0) / 60000).toFixed(1),
+        "Work Time (min)": +(workMs / 60000).toFixed(1),
+        "Break Time (min)": +(breakMs / 60000).toFixed(1),
+        Breaks: (s.pauses || []).filter((p) => p.end).length,
+        Type: s.type,
+        Tags: sanitizeCell((s.tags || []).join(", ")),
+        Notes: sanitizeCell(s.notes || ""),
+      };
+    });
 
     // Sheet 3: Git Activity
     const gitSheet = commits.map((c) => ({
@@ -2479,19 +2660,6 @@ function SettingsModal({ open, onClose, data, updateSettings, setData }) {
               type="number"
               value={form.dailyGoal || 8}
               onChange={(e) => setForm({ ...form, dailyGoal: +e.target.value })}
-              className="w-full mt-1 px-4 py-2 bg-stone-800 border border-stone-700 rounded-lg text-sm"
-            />
-          </div>
-          <div>
-            <label className="text-xs text-stone-400">
-              Idle Detection (minutes, 0=off)
-            </label>
-            <input
-              type="number"
-              value={form.idleMinutes || 10}
-              onChange={(e) =>
-                setForm({ ...form, idleMinutes: +e.target.value })
-              }
               className="w-full mt-1 px-4 py-2 bg-stone-800 border border-stone-700 rounded-lg text-sm"
             />
           </div>
