@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo } from "react";
+import { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   LineChart,
@@ -15,7 +15,6 @@ import {
   CartesianGrid,
   Tooltip,
   ResponsiveContainer,
-  Legend,
 } from "recharts";
 import * as XLSX from "xlsx";
 
@@ -255,9 +254,17 @@ const save = (data) => {
 
 export default function App() {
   const [data, setData] = useState(() => load() || DEFAULT_DATA);
+  const [now] = useState(() => Date.now());
   const [view, setView] = useState("dashboard");
-  const [activeSession, setActiveSession] = useState(null);
-  const [elapsed, setElapsed] = useState(0);
+  const [activeSession, setActiveSession] = useState(() => {
+    const d = load();
+    return (d?.sessions || []).find((s) => s.status === "running") || null;
+  });
+  const [elapsed, setElapsed] = useState(() => {
+    const d = load();
+    const running = (d?.sessions || []).find((s) => s.status === "running");
+    return running ? Date.now() - running.start : 0;
+  });
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [toast, setToast] = useState(null);
   const saveTimer = useRef(null);
@@ -278,6 +285,51 @@ export default function App() {
     const id = setInterval(tick, 1000);
     return () => clearInterval(id);
   }, [activeSession]);
+
+  const toastTimer = useRef(null);
+
+  const showToast = useCallback((msg, type = "success") => {
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    setToast({ msg, type });
+    toastTimer.current = setTimeout(() => setToast(null), 3000);
+  }, []);
+
+  const startSession = (type = "work", tags = [], notes = "") => {
+    const session = {
+      id: `s_${Date.now()}`,
+      type,
+      start: Date.now(),
+      end: null,
+      duration: 0,
+      tags,
+      notes,
+      status: "running",
+    };
+    setActiveSession(session);
+    setElapsed(0);
+    setData((d) => ({ ...d, sessions: [...d.sessions, session] }));
+    showToast(`${type === "work" ? "💼 Work" : "☕ Break"} session started`);
+  };
+
+  const stopSession = useCallback(() => {
+    setActiveSession((current) => {
+      if (!current) return null;
+      const now = Date.now();
+      const ended = {
+        ...current,
+        end: now,
+        duration: now - current.start,
+        status: "completed",
+      };
+      setData((d) => ({
+        ...d,
+        sessions: d.sessions.map((s) => (s.id === current.id ? ended : s)),
+      }));
+      setElapsed(0);
+      showToast("Session completed ✓");
+      return null;
+    });
+  }, [showToast]);
 
   // Idle detection — auto-stop session after configured minutes
   useEffect(() => {
@@ -305,59 +357,7 @@ export default function App() {
       events.forEach((e) => window.removeEventListener(e, resetIdle));
       clearInterval(idleCheck);
     };
-  }, [activeSession, data.settings.idleMinutes]);
-
-  // Restore active session on mount
-  useEffect(() => {
-    const running = data.sessions.find((s) => s.status === "running");
-    if (running) {
-      setActiveSession(running);
-      setElapsed(Date.now() - running.start);
-    }
-  }, []);
-
-  const toastTimer = useRef(null);
-
-  const showToast = (msg, type = "success") => {
-    if (toastTimer.current) clearTimeout(toastTimer.current);
-    setToast({ msg, type });
-    toastTimer.current = setTimeout(() => setToast(null), 3000);
-  };
-
-  const startSession = (type = "work", tags = [], notes = "") => {
-    const session = {
-      id: `s_${Date.now()}`,
-      type,
-      start: Date.now(),
-      end: null,
-      duration: 0,
-      tags,
-      notes,
-      status: "running",
-    };
-    setActiveSession(session);
-    setElapsed(0);
-    setData((d) => ({ ...d, sessions: [...d.sessions, session] }));
-    showToast(`${type === "work" ? "💼 Work" : "☕ Break"} session started`);
-  };
-
-  const stopSession = () => {
-    if (!activeSession) return;
-    const now = Date.now();
-    const ended = {
-      ...activeSession,
-      end: now,
-      duration: now - activeSession.start,
-      status: "completed",
-    };
-    setData((d) => ({
-      ...d,
-      sessions: d.sessions.map((s) => (s.id === activeSession.id ? ended : s)),
-    }));
-    setActiveSession(null);
-    setElapsed(0);
-    showToast("Session completed ✓");
-  };
+  }, [activeSession, data.settings.idleMinutes, stopSession, showToast]);
 
   const deleteSession = (id) => {
     setData((d) => ({ ...d, sessions: d.sessions.filter((s) => s.id !== id) }));
@@ -390,7 +390,7 @@ export default function App() {
     const totalBreaks = breaksToday.reduce((a, s) => a + s.duration, 0);
 
     // Weekly
-    const weekAgo = Date.now() - 7 * 86400000;
+    const weekAgo = now - 7 * 86400000;
     const weekSessions = data.sessions.filter(
       (s) => s.status === "completed" && s.start > weekAgo && s.type === "work",
     );
@@ -401,7 +401,7 @@ export default function App() {
     let currentStreak = 0;
     let bestStreak = 0;
     for (let d = 0; d < 365; d++) {
-      const dayStart = startOfDay(Date.now()) - d * 86400000;
+      const dayStart = startOfDay(now) - d * 86400000;
       const dayEnd = dayStart + 86400000;
       const dayWork = data.sessions
         .filter(
@@ -431,13 +431,13 @@ export default function App() {
       bestStreak,
       sessions: data.sessions,
     };
-  }, [data.sessions, data.settings.dailyGoal]);
+  }, [data.sessions, data.settings.dailyGoal, now]);
 
   // Weekly chart data
   const weeklyData = useMemo(() => {
     const arr = [];
     for (let d = 6; d >= 0; d--) {
-      const dayStart = startOfDay(Date.now()) - d * 86400000;
+      const dayStart = startOfDay(now) - d * 86400000;
       const dayEnd = dayStart + 86400000;
       const work = data.sessions
         .filter(
@@ -465,7 +465,7 @@ export default function App() {
       });
     }
     return arr;
-  }, [data.sessions]);
+  }, [data.sessions, now]);
 
   const nav = [
     { id: "dashboard", label: "Dashboard", icon: ICONS.dashboard },
@@ -559,6 +559,7 @@ export default function App() {
             )}
             {view === "timer" && (
               <TimerView
+                key={activeSession?.id || "idle"}
                 activeSession={activeSession}
                 elapsed={elapsed}
                 startSession={startSession}
@@ -594,6 +595,7 @@ export default function App() {
       </main>
 
       <SettingsModal
+        key={settingsOpen ? "open" : "closed"}
         open={settingsOpen}
         onClose={() => setSettingsOpen(false)}
         data={data}
@@ -612,7 +614,6 @@ function Dashboard({
   weeklyData,
   activeSession,
   startSession,
-  setView,
 }) {
   const goal = data.settings.dailyGoal || 8;
   const workedHrs = (stats.totalToday / 3600000).toFixed(1);
@@ -837,8 +838,8 @@ function TimerView({
   data,
   showToast,
 }) {
-  const [tags, setTags] = useState("");
-  const [notes, setNotes] = useState("");
+  const [tags, setTags] = useState(() => activeSession?.tags?.join(", ") || "");
+  const [notes, setNotes] = useState(() => activeSession?.notes || "");
   const [type, setType] = useState("work");
 
   const handleStart = () => {
@@ -865,13 +866,6 @@ function TimerView({
       });
     showToast("Notes saved");
   };
-
-  useEffect(() => {
-    if (activeSession) {
-      setNotes(activeSession.notes || "");
-      setTags(activeSession.tags?.join(", ") || "");
-    }
-  }, [activeSession?.id]);
 
   const todaySessions = useMemo(
     () =>
@@ -1423,14 +1417,15 @@ function GitView({ data, addCommit, setData, showToast }) {
 }
 
 // ============ ANALYTICS VIEW ============
-function AnalyticsView({ data, weeklyData }) {
+function AnalyticsView({ data }) {
   const [range, setRange] = useState("week");
+  const [now] = useState(() => Date.now());
 
   const rangeData = useMemo(() => {
     const days = range === "week" ? 7 : range === "month" ? 30 : 365;
     const arr = [];
     for (let d = days - 1; d >= 0; d--) {
-      const dayStart = startOfDay(Date.now()) - d * 86400000;
+      const dayStart = startOfDay(now) - d * 86400000;
       const dayEnd = dayStart + 86400000;
       const work = data.sessions
         .filter(
@@ -1451,7 +1446,7 @@ function AnalyticsView({ data, weeklyData }) {
       });
     }
     return arr;
-  }, [data.sessions, range]);
+  }, [data.sessions, range, now]);
 
   const totalHrs = rangeData.reduce((a, r) => a + r.hours, 0);
   const avgHrs = (totalHrs / rangeData.length).toFixed(1);
@@ -1459,7 +1454,7 @@ function AnalyticsView({ data, weeklyData }) {
 
   const { tagData, hourlyData } = useMemo(() => {
     const rangeDays = range === "week" ? 7 : range === "month" ? 30 : 365;
-    const rangeCutoff = Date.now() - rangeDays * 86400000;
+    const rangeCutoff = now - rangeDays * 86400000;
 
     const tagBreakdown = {};
     data.sessions
@@ -1497,7 +1492,7 @@ function AnalyticsView({ data, weeklyData }) {
     }));
 
     return { tagData, hourlyData };
-  }, [data.sessions, range]);
+  }, [data.sessions, range, now]);
 
   const COLORS = [
     "#6366f1",
@@ -1926,11 +1921,7 @@ function ExportView({ data, showToast }) {
 
 // ============ SETTINGS MODAL ============
 function SettingsModal({ open, onClose, data, updateSettings, setData }) {
-  const [form, setForm] = useState(data.settings);
-
-  useEffect(() => {
-    setForm(data.settings);
-  }, [data.settings]);
+  const [form, setForm] = useState(() => data.settings);
 
   useEffect(() => {
     if (!open) return;
