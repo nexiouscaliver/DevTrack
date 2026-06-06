@@ -1196,6 +1196,7 @@ function SessionsView({ data, deleteSession, updateSession }) {
                           setEditingId(null);
                         }}
                         className="p-2 rounded-lg bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30"
+                        aria-label="Save changes"
                       >
                         <Icon path={ICONS.check} size={16} />
                       </button>
@@ -1209,6 +1210,7 @@ function SessionsView({ data, deleteSession, updateSession }) {
                           });
                         }}
                         className="p-2 rounded-lg hover:bg-slate-800 text-slate-400"
+                        aria-label="Edit session"
                       >
                         <Icon path={ICONS.edit} size={16} />
                       </button>
@@ -1216,6 +1218,7 @@ function SessionsView({ data, deleteSession, updateSession }) {
                     <button
                       onClick={() => deleteSession(s.id)}
                       className="p-2 rounded-lg hover:bg-rose-500/20 text-slate-400 hover:text-rose-400"
+                      aria-label="Delete session"
                     >
                       <Icon path={ICONS.trash} size={16} />
                     </button>
@@ -1943,11 +1946,14 @@ function SettingsModal({ open, onClose, data, updateSettings, setData }) {
         initial={{ scale: 0.95, opacity: 0 }}
         animate={{ scale: 1, opacity: 1 }}
         onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Settings"
         className="bg-slate-900 border border-slate-800 rounded-2xl p-6 w-full max-w-md"
       >
         <div className="flex items-center justify-between mb-5">
           <h3 className="text-lg font-bold">Settings</h3>
-          <button onClick={onClose} className="text-slate-400 hover:text-white">
+          <button onClick={onClose} className="text-slate-400 hover:text-white" aria-label="Close settings">
             ✕
           </button>
         </div>
@@ -2008,24 +2014,26 @@ function SettingsModal({ open, onClose, data, updateSettings, setData }) {
 // ============ TOAST ============
 function Toast({ toast }) {
   return (
-    <AnimatePresence>
-      {toast && (
-        <motion.div
-          initial={{ y: 50, opacity: 0 }}
-          animate={{ y: 0, opacity: 1 }}
-          exit={{ y: 50, opacity: 0 }}
-          className="fixed bottom-6 right-6 z-50 px-5 py-3 bg-slate-800 border border-slate-700 rounded-xl shadow-2xl flex items-center gap-2"
-        >
-          <Icon
-            path={toast.type === "error" ? ICONS.alert : ICONS.check}
-            size={18}
-            className={
-              toast.type === "error" ? "text-rose-400" : "text-emerald-400"
-            }
-          />
-          {toast.msg}
-        </motion.div>
-      )}
-    </AnimatePresence>
+    <div aria-live="polite" role="status">
+      <AnimatePresence>
+        {toast && (
+          <motion.div
+            initial={{ y: 50, opacity: 0 }}
+            animate={{ y: 0, opacity: 1 }}
+            exit={{ y: 50, opacity: 0 }}
+            className="fixed bottom-6 right-6 z-50 px-5 py-3 bg-slate-800 border border-slate-700 rounded-xl shadow-2xl flex items-center gap-2"
+          >
+            <Icon
+              path={toast.type === "error" ? ICONS.alert : ICONS.check}
+              size={18}
+              className={
+                toast.type === "error" ? "text-rose-400" : "text-emerald-400"
+              }
+            />
+            {toast.msg}
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
   );
 }
