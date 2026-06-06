@@ -198,6 +198,19 @@ const ICONS = {
       <rect x="8" y="2" width="8" height="4" rx="1" ry="1" />
     </>
   ),
+  menu: (
+    <>
+      <line x1="3" y1="6" x2="21" y2="6" />
+      <line x1="3" y1="12" x2="21" y2="12" />
+      <line x1="3" y1="18" x2="21" y2="18" />
+    </>
+  ),
+  close: (
+    <>
+      <line x1="18" y1="6" x2="6" y2="18" />
+      <line x1="6" y1="6" x2="18" y2="18" />
+    </>
+  ),
 };
 
 // Helpers
@@ -296,6 +309,7 @@ export default function App() {
     return running ? Date.now() - running.start : 0;
   });
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [toast, setToast] = useState(null);
   const saveTimer = useRef(null);
 
@@ -508,8 +522,108 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 font-sans flex">
+      {/* Mobile header bar */}
+      <div className="md:hidden fixed top-0 left-0 right-0 z-40 bg-slate-900/95 backdrop-blur border-b border-slate-800 px-4 py-3 flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center">
+            <Icon path={ICONS.zap} size={16} className="text-white" />
+          </div>
+          <span className="font-bold">DevTrack</span>
+        </div>
+        <button
+          onClick={() => setMobileMenuOpen(true)}
+          className="p-2 rounded-lg hover:bg-slate-800 text-slate-400"
+          aria-label="Open menu"
+        >
+          <Icon path={ICONS.menu} size={22} />
+        </button>
+      </div>
+
+      {/* Mobile overlay sidebar */}
+      <AnimatePresence>
+        {mobileMenuOpen && (
+          <>
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 bg-black/60 z-40 md:hidden"
+              onClick={() => setMobileMenuOpen(false)}
+            />
+            <motion.aside
+              initial={{ x: -280 }}
+              animate={{ x: 0 }}
+              exit={{ x: -280 }}
+              transition={{ type: "spring", damping: 25, stiffness: 300 }}
+              className="fixed left-0 top-0 bottom-0 w-64 bg-slate-900 border-r border-slate-800 p-5 flex flex-col z-50 md:hidden"
+            >
+              <div className="flex items-center justify-between mb-8">
+                <div className="flex items-center gap-2">
+                  <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center shadow-lg shadow-indigo-500/30">
+                    <Icon path={ICONS.zap} size={20} className="text-white" />
+                  </div>
+                  <div>
+                    <h1 className="font-bold text-lg leading-none">DevTrack</h1>
+                    <p className="text-xs text-slate-400">Smart Work Tracker</p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setMobileMenuOpen(false)}
+                  className="p-2 rounded-lg hover:bg-slate-800 text-slate-400"
+                  aria-label="Close menu"
+                >
+                  <Icon path={ICONS.close} size={20} />
+                </button>
+              </div>
+              <nav className="flex-1 space-y-1">
+                {nav.map((item) => (
+                  <button
+                    key={item.id}
+                    onClick={() => {
+                      setView(item.id);
+                      setMobileMenuOpen(false);
+                    }}
+                    className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-all ${
+                      view === item.id
+                        ? "bg-gradient-to-r from-indigo-500/20 to-purple-500/10 text-white border border-indigo-500/30"
+                        : "text-slate-400 hover:bg-slate-800/50 hover:text-white"
+                    }`}
+                  >
+                    <Icon path={item.icon} size={18} />
+                    {item.label}
+                  </button>
+                ))}
+              </nav>
+              {activeSession && (
+                <div className="p-3 rounded-xl bg-gradient-to-br from-emerald-500/20 to-teal-500/10 border border-emerald-500/30">
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                    <span className="text-xs font-medium text-emerald-300 uppercase">
+                      {activeSession.type}
+                    </span>
+                  </div>
+                  <div className="font-mono text-xl font-bold">
+                    {formatDuration(elapsed)}
+                  </div>
+                </div>
+              )}
+              <button
+                onClick={() => {
+                  setSettingsOpen(true);
+                  setMobileMenuOpen(false);
+                }}
+                className="mt-4 flex items-center gap-2 px-3 py-2 text-sm text-slate-400 hover:text-white rounded-lg hover:bg-slate-800/50"
+              >
+                <Icon path={ICONS.settings} size={16} />
+                Settings
+              </button>
+            </motion.aside>
+          </>
+        )}
+      </AnimatePresence>
+
       {/* Sidebar */}
-      <aside className="w-64 bg-slate-900/50 backdrop-blur border-r border-slate-800 p-5 flex flex-col sticky top-0 h-screen">
+      <aside className="hidden md:flex w-64 bg-slate-900/50 backdrop-blur border-r border-slate-800 p-5 flex-col sticky top-0 h-screen">
         <div className="flex items-center gap-2 mb-8">
           <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center shadow-lg shadow-indigo-500/30">
             <Icon path={ICONS.zap} size={20} className="text-white" />
@@ -568,7 +682,7 @@ export default function App() {
       </aside>
 
       {/* Main */}
-      <main className="flex-1 p-8 overflow-auto">
+      <main className="flex-1 p-4 md:p-8 overflow-auto pt-16 md:pt-8">
         <AnimatePresence mode="wait">
           <motion.div
             key={view}
@@ -714,7 +828,7 @@ function Dashboard({
       </div>
 
       {/* Stats grid */}
-      <div className="grid grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 md:gap-4">
         <StatCard
           label="Worked Today"
           value={`${workedHrs}h`}
@@ -747,8 +861,8 @@ function Dashboard({
       </div>
 
       {/* Charts + Activity */}
-      <div className="grid grid-cols-3 gap-6">
-        <div className="col-span-2 bg-slate-900/50 border border-slate-800 rounded-2xl p-6">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+        <div className="col-span-1 md:col-span-2 bg-slate-900/50 border border-slate-800 rounded-2xl p-6">
           <div className="flex items-center justify-between mb-4">
             <h3 className="font-semibold">This Week</h3>
             <span className="text-xs text-slate-400">
@@ -917,9 +1031,9 @@ function TimerView({
       <div className="bg-gradient-to-br from-slate-900 to-slate-900/50 border border-slate-800 rounded-2xl p-10 text-center">
         {/* Timer display */}
         <div className="relative inline-block mb-6">
-          <div className="w-64 h-64 rounded-full border-4 border-slate-800 flex items-center justify-center relative">
+          <div className="w-48 h-48 sm:w-56 sm:h-56 md:w-64 md:h-64 rounded-full border-4 border-slate-800 flex items-center justify-center relative">
             {activeSession && (
-              <svg className="absolute inset-0 w-full h-full -rotate-90">
+              <svg className="absolute inset-0 w-full h-full -rotate-90" viewBox="0 0 256 256">
                 <circle
                   cx="128"
                   cy="128"
@@ -939,7 +1053,7 @@ function TimerView({
               </svg>
             )}
             <div>
-              <div className="font-mono text-5xl font-bold">
+              <div className="font-mono text-4xl sm:text-5xl font-bold">
                 {formatDuration(activeSession ? elapsed : 0)}
               </div>
               <div className="text-xs uppercase tracking-widest text-slate-400 mt-2">
@@ -1336,7 +1450,7 @@ function GitView({ data, addCommit, setData, showToast }) {
         <p className="text-slate-400">Sync your GitHub commits automatically</p>
       </div>
 
-      <div className="grid grid-cols-2 gap-6">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <div className="bg-slate-900/50 border border-slate-800 rounded-2xl p-6">
           <h3 className="font-semibold mb-4 flex items-center gap-2">
             <Icon path={ICONS.github} size={18} /> GitHub Sync
@@ -1580,7 +1694,7 @@ function AnalyticsView({ data }) {
         </div>
       </div>
 
-      <div className="grid grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         <div className="bg-slate-900/50 border border-slate-800 rounded-2xl p-5">
           <p className="text-xs text-slate-400 uppercase">Total</p>
           <p className="text-3xl font-bold mt-1">
@@ -1629,7 +1743,7 @@ function AnalyticsView({ data }) {
         </ResponsiveContainer>
       </div>
 
-      <div className="grid grid-cols-2 gap-6">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <div className="bg-slate-900/50 border border-slate-800 rounded-2xl p-6">
           <h3 className="font-semibold mb-4">Work by Tag</h3>
           {tagData.length === 0 ? (
@@ -1672,8 +1786,8 @@ function AnalyticsView({ data }) {
               <XAxis
                 dataKey="hour"
                 stroke="#64748b"
-                fontSize={9}
-                interval={2}
+                fontSize={11}
+                interval={3}
               />
               <YAxis stroke="#64748b" fontSize={11} />
               <Tooltip
@@ -1930,7 +2044,7 @@ function ExportView({ data, showToast }) {
         <h3 className="font-semibold mb-4 flex items-center gap-2">
           <Icon path={ICONS.clipboard} size={18} /> What's included in the Excel
         </h3>
-        <div className="grid grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           {[
             {
               title: "Summary",
