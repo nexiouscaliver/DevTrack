@@ -955,6 +955,7 @@ export default function App() {
         data={data}
         updateSettings={updateSettings}
         setData={setData}
+        showToast={showToast}
       />
       <Toast toast={toast} />
     </div>
@@ -1929,20 +1930,24 @@ function GitView({ data, addCommit, setData, showToast, importEstimatedSession, 
       {data.commits.length > 0 && (
         <div className="flex gap-1 bg-stone-900 border border-stone-800 p-1 rounded-xl w-fit">
           {[
-            { id: "all", label: "All Work", icon: null },
-            { id: "me", label: "My Work", icon: null },
-            { id: "us", label: "Our Work", icon: null },
+            { id: "all", label: "All Work" },
+            { id: "me", label: "My Work" },
+            { id: "us", label: "Our Work" },
           ].map((tab) => (
             <button
               key={tab.id}
-              onClick={() => setAuthorFilter(tab.id)}
-              disabled={tab.id !== "all" && !hasIdentities}
+              onClick={() => {
+                if (tab.id !== "all" && !hasIdentities) {
+                  showToast("Add your git identities in Settings → My Git Identities to filter by author", "error");
+                  return;
+                }
+                setAuthorFilter(tab.id);
+              }}
               className={`px-4 py-1.5 rounded-lg text-sm capitalize transition-colors ${
-                authorFilter === tab.id
+                authorFilter === tab.id && (tab.id === "all" || hasIdentities)
                   ? "bg-violet-500 text-white"
                   : "text-stone-400 hover:text-stone-200"
-              } ${tab.id !== "all" && !hasIdentities ? "opacity-30 cursor-not-allowed" : ""}`}
-              title={tab.id !== "all" && !hasIdentities ? "Add identities in Settings to filter" : ""}
+              }`}
             >
               {tab.label}
             </button>
@@ -2856,9 +2861,12 @@ function ExportView({ data, showToast }) {
 }
 
 // ============ SETTINGS MODAL ============
-function SettingsModal({ open, onClose, data, updateSettings, setData }) {
-  const [form, setForm] = useState(() => data.settings);
+function SettingsModal({ open, onClose, data, updateSettings, setData, showToast }) {
+  const [form, setForm] = useState(data.settings);
+  const [newIdentityName, setNewIdentityName] = useState("");
+  const [newIdentityEmail, setNewIdentityEmail] = useState("");
 
+  // Sync form when modal opens and handle Escape key
   useEffect(() => {
     if (!open) return;
     const handleKey = (e) => {
@@ -2869,6 +2877,75 @@ function SettingsModal({ open, onClose, data, updateSettings, setData }) {
   }, [open, onClose]);
 
   if (!open) return null;
+
+  const gitAuthors = form.gitAuthors || { identities: [], autoDetected: null };
+  const identities = gitAuthors.identities || [];
+
+  const addIdentity = () => {
+    const name = newIdentityName.trim();
+    const email = newIdentityEmail.trim();
+    if (!name && !email) return;
+    const exists = identities.some(
+      (id) => id.email?.toLowerCase() === email.toLowerCase() && email,
+    );
+    if (exists) return;
+    setForm({
+      ...form,
+      gitAuthors: {
+        ...gitAuthors,
+        identities: [...identities, { name, email }],
+      },
+    });
+    setNewIdentityName("");
+    setNewIdentityEmail("");
+  };
+
+  const removeIdentity = (index) => {
+    setForm({
+      ...form,
+      gitAuthors: {
+        ...gitAuthors,
+        identities: identities.filter((_, i) => i !== index),
+      },
+    });
+  };
+
+  const autoDetectIdentities = async () => {
+    const repos = data.settings.trackedRepos || [];
+    if (repos.length === 0) {
+      showToast("No tracked repos to detect from", "error");
+      return;
+    }
+    const detected = [...identities];
+    for (const repo of repos) {
+      try {
+        const res = await fetch("/api/git/user", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path: repo.path }),
+        });
+        if (!res.ok) continue;
+        const user = await res.json();
+        if (!user.name && !user.email) continue;
+        const alreadyKnown = detected.some(
+          (id) => id.email?.toLowerCase() === user.email?.toLowerCase(),
+        );
+        if (!alreadyKnown) {
+          detected.push({ name: user.name, email: user.email });
+        }
+      } catch { /* skip unavailable repos */ }
+    }
+    setForm({
+      ...form,
+      gitAuthors: { ...gitAuthors, identities: detected, autoDetected: detected[detected.length - 1] || null },
+    });
+    const newCount = detected.length - identities.length;
+    if (newCount > 0) {
+      showToast(`Detected ${newCount} new identit${newCount !== 1 ? "ies" : "y"}`);
+    } else {
+      showToast("All identities already known");
+    }
+  };
 
   return (
     <div
@@ -2882,7 +2959,7 @@ function SettingsModal({ open, onClose, data, updateSettings, setData }) {
         role="dialog"
         aria-modal="true"
         aria-label="Settings"
-        className="bg-stone-900 border border-stone-800 rounded-2xl p-6 w-full max-w-md"
+        className="bg-stone-900 border border-stone-800 rounded-2xl p-6 w-full max-w-md max-h-[85vh] overflow-y-auto"
       >
         <div className="flex items-center justify-between mb-5">
           <h3 className="text-lg font-bold">Settings</h3>
@@ -2915,6 +2992,75 @@ function SettingsModal({ open, onClose, data, updateSettings, setData }) {
               className="w-full mt-1 px-4 py-2 bg-stone-800 border border-stone-700 rounded-lg text-sm"
             />
           </div>
+
+          {/* Author Identity Management */}
+          <div className="border-t border-stone-800 pt-4">
+            <div className="flex items-center justify-between mb-2">
+              <label className="text-xs text-stone-400 uppercase tracking-wide">
+                My Git Identities
+              </label>
+              <button
+                onClick={autoDetectIdentities}
+                className="text-xs text-violet-400 hover:text-violet-300 transition-colors"
+              >
+                Auto-detect
+              </button>
+            </div>
+            <p className="text-[11px] text-stone-500 mb-3">
+              Commits from these authors appear as &quot;My Work&quot; in Git Tracking.
+              Add your different work emails here.
+            </p>
+
+            {/* Identity chips */}
+            {identities.length > 0 && (
+              <div className="flex flex-wrap gap-1.5 mb-3">
+                {identities.map((id, i) => (
+                  <span
+                    key={i}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-violet-500/15 text-violet-300 rounded-lg text-xs"
+                  >
+                    {id.name || id.email}
+                    <button
+                      onClick={() => removeIdentity(i)}
+                      className="text-violet-400 hover:text-violet-200 transition-colors"
+                      aria-label={`Remove ${id.name || id.email}`}
+                    >
+                      ✕
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
+
+            {/* Add identity inputs */}
+            <div className="flex gap-2">
+              <input
+                type="text"
+                placeholder="Name"
+                value={newIdentityName}
+                onChange={(e) => setNewIdentityName(e.target.value)}
+                className="flex-1 px-3 py-1.5 bg-stone-800 border border-stone-700 rounded-lg text-sm"
+              />
+              <input
+                type="email"
+                placeholder="Email"
+                value={newIdentityEmail}
+                onChange={(e) => setNewIdentityEmail(e.target.value)}
+                className="flex-1 px-3 py-1.5 bg-stone-800 border border-stone-700 rounded-lg text-sm"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") addIdentity();
+                }}
+              />
+              <button
+                onClick={addIdentity}
+                disabled={!newIdentityName.trim() && !newIdentityEmail.trim()}
+                className="px-3 py-1.5 rounded-lg bg-violet-500/20 text-violet-300 hover:bg-violet-500/30 text-sm font-medium disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+              >
+                Add
+              </button>
+            </div>
+          </div>
+
           <div className="flex gap-2">
             <button
               onClick={() => {
