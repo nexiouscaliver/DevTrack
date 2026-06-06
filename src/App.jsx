@@ -351,6 +351,23 @@ const estimateWorkHours = (commits, config = {}) => {
   });
 };
 
+/**
+ * Filter commits by author identity.
+ * mode: "all" → return everything, "me"/"us" → match against gitAuthors.identities
+ */
+const filterByAuthor = (commits, gitAuthors, mode) => {
+  if (mode === "all") return commits;
+  const identities = gitAuthors?.identities || [];
+  if (identities.length === 0) return commits;
+  return commits.filter((c) =>
+    identities.some(
+      (id) =>
+        (id.email && c.authorEmail?.toLowerCase() === id.email.toLowerCase()) ||
+        (id.name && c.author?.toLowerCase() === id.name.toLowerCase()),
+    ),
+  );
+};
+
 const STORAGE_KEY = "devtrack_data_v1";
 
 const DEFAULT_DATA = {
@@ -697,17 +714,6 @@ export default function App() {
       .reduce((acc, s) => acc + s.duration, 0);
   }, [gitEstimatedSessions, now]);
 
-  const gitEstimatedByRepo = useMemo(() => {
-    const byRepo = {};
-    gitEstimatedSessions.forEach((s) => {
-      const repo = s.repoName || "unknown";
-      if (!byRepo[repo]) byRepo[repo] = { total: 0, sessions: [] };
-      byRepo[repo].total += s.duration;
-      byRepo[repo].sessions.push(s);
-    });
-    return byRepo;
-  }, [gitEstimatedSessions]);
-
   const nav = [
     { id: "dashboard", label: "Dashboard", icon: ICONS.dashboard },
     { id: "timer", label: "Timer", icon: ICONS.timer },
@@ -927,8 +933,6 @@ export default function App() {
                 addCommit={addCommit}
                 setData={setData}
                 showToast={showToast}
-                gitEstimatedByRepo={gitEstimatedByRepo}
-                gitEstimatedSessions={gitEstimatedSessions}
                 importEstimatedSession={importEstimatedSession}
                 importAllEstimated={importAllEstimated}
                 isImported={isImported}
@@ -1717,13 +1721,14 @@ function SessionsView({ data, deleteSession, updateSession }) {
 }
 
 // ============ GIT VIEW ============
-function GitView({ data, addCommit, setData, showToast, gitEstimatedByRepo, gitEstimatedSessions, importEstimatedSession, importAllEstimated, isImported }) {
+function GitView({ data, addCommit, setData, showToast, importEstimatedSession, importAllEstimated, isImported }) {
   const [repoPath, setRepoPath] = useState("");
   const [validating, setValidating] = useState(false);
   const [repoError, setRepoError] = useState("");
   const [syncingRepoId, setSyncingRepoId] = useState(null);
   const [serverStatus, setServerStatus] = useState(null); // "online" | "offline" | "no-git"
   const [repoFilter, setRepoFilter] = useState("all");
+  const [authorFilter, setAuthorFilter] = useState("all");
   const [manualCommit, setManualCommit] = useState({
     sha: "",
     message: "",
@@ -1875,15 +1880,41 @@ function GitView({ data, addCommit, setData, showToast, gitEstimatedByRepo, gitE
   };
 
   // Filter commits by selected repo
+  // Author-filtered commits (applied before repo filter)
+  const authorFilteredCommits = useMemo(
+    () => filterByAuthor(data.commits, data.settings.gitAuthors, authorFilter),
+    [data.commits, data.settings.gitAuthors, authorFilter],
+  );
+
+  // Repo + author filtered commits
   const filteredCommits =
     repoFilter === "all"
-      ? data.commits
-      : data.commits.filter((c) => c.repo === repoFilter);
+      ? authorFilteredCommits
+      : authorFilteredCommits.filter((c) => c.repo === repoFilter);
 
-  // Unique repo names for filter dropdown
+  // Author-filtered estimated sessions & by-repo grouping
+  const filteredEstimates = useMemo(
+    () => estimateWorkHours(filterByAuthor(data.commits, data.settings.gitAuthors, authorFilter)),
+    [data.commits, data.settings.gitAuthors, authorFilter],
+  );
+
+  const filteredEstimatesByRepo = useMemo(() => {
+    const byRepo = {};
+    filteredEstimates.forEach((s) => {
+      const repo = s.repoName || "unknown";
+      if (!byRepo[repo]) byRepo[repo] = { total: 0, sessions: [] };
+      byRepo[repo].total += s.duration;
+      byRepo[repo].sessions.push(s);
+    });
+    return byRepo;
+  }, [filteredEstimates]);
+
+  // Unique repo names for filter dropdown (from all commits, not filtered)
   const repoNames = [
     ...new Set(data.commits.map((c) => c.repo).filter(Boolean)),
   ];
+
+  const hasIdentities = (data.settings.gitAuthors?.identities || []).length > 0;
 
   return (
     <div className="max-w-5xl mx-auto space-y-6">
@@ -1893,6 +1924,31 @@ function GitView({ data, addCommit, setData, showToast, gitEstimatedByRepo, gitE
           Track commits from your local git repositories
         </p>
       </div>
+
+      {/* Author filter tabs */}
+      {data.commits.length > 0 && (
+        <div className="flex gap-1 bg-stone-900 border border-stone-800 p-1 rounded-xl w-fit">
+          {[
+            { id: "all", label: "All Work", icon: null },
+            { id: "me", label: "My Work", icon: null },
+            { id: "us", label: "Our Work", icon: null },
+          ].map((tab) => (
+            <button
+              key={tab.id}
+              onClick={() => setAuthorFilter(tab.id)}
+              disabled={tab.id !== "all" && !hasIdentities}
+              className={`px-4 py-1.5 rounded-lg text-sm capitalize transition-colors ${
+                authorFilter === tab.id
+                  ? "bg-violet-500 text-white"
+                  : "text-stone-400 hover:text-stone-200"
+              } ${tab.id !== "all" && !hasIdentities ? "opacity-30 cursor-not-allowed" : ""}`}
+              title={tab.id !== "all" && !hasIdentities ? "Add identities in Settings to filter" : ""}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* Server status banner */}
       {serverStatus === "offline" && (
@@ -2149,17 +2205,22 @@ function GitView({ data, addCommit, setData, showToast, gitEstimatedByRepo, gitE
       </div>
 
       {/* Estimated Work Hours */}
-      {gitEstimatedSessions && gitEstimatedSessions.length > 0 && (
+      {filteredEstimates && filteredEstimates.length > 0 && (
         <div className="bg-stone-900/50 border border-stone-800 rounded-2xl p-6">
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center gap-2">
               <Icon path={ICONS.chart} size={16} className="text-violet-400" />
               <h3 className="font-semibold">Estimated Work Hours</h3>
+              {authorFilter !== "all" && (
+                <span className="text-xs text-stone-500">
+                  ({authorFilter === "me" ? "My Work" : "Our Work"} filter)
+                </span>
+              )}
             </div>
-            {gitEstimatedSessions.length > 0 && (
+            {filteredEstimates.length > 0 && (
               <button
-                onClick={() => importAllEstimated(gitEstimatedSessions.filter((s) => !isImported(s.id)))}
-                disabled={gitEstimatedSessions.every((s) => isImported(s.id))}
+                onClick={() => importAllEstimated(filteredEstimates.filter((s) => !isImported(s.id)))}
+                disabled={filteredEstimates.every((s) => isImported(s.id))}
                 className="px-3 py-1.5 rounded-lg bg-violet-500/20 hover:bg-violet-500/30 text-violet-300 text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
               >
                 Import All
@@ -2168,7 +2229,7 @@ function GitView({ data, addCommit, setData, showToast, gitEstimatedByRepo, gitE
           </div>
 
           {/* Per-repo breakdown */}
-          {gitEstimatedByRepo && Object.entries(gitEstimatedByRepo).map(([repo, info]) => {
+          {filteredEstimatesByRepo && Object.entries(filteredEstimatesByRepo).map(([repo, info]) => {
             const repoHrs = (info.total / 3600000).toFixed(1);
             const allImported = info.sessions.every((s) => isImported(s.id));
             return (
@@ -2236,11 +2297,15 @@ function GitView({ data, addCommit, setData, showToast, gitEstimatedByRepo, gitE
         </div>
       )}
 
-      {/* Empty state when commits exist but no estimates */}
-      {gitEstimatedSessions && gitEstimatedSessions.length === 0 && data.commits && data.commits.length > 0 && (
+      {/* Empty state when commits exist but no estimates (or filter yielded nothing) */}
+      {filteredEstimates && filteredEstimates.length === 0 && data.commits && data.commits.length > 0 && (
         <div className="bg-stone-900/50 border border-stone-800 rounded-2xl p-6 text-center">
           <Icon path={ICONS.chart} size={24} className="text-stone-600 mx-auto mb-2" />
-          <p className="text-sm text-stone-500">Sync commits to see estimated work hours</p>
+          <p className="text-sm text-stone-500">
+            {authorFilter !== "all"
+              ? "No matching commits for this filter. Try switching to \"All Work\" or add identities in Settings."
+              : "Sync commits to see estimated work hours"}
+          </p>
         </div>
       )}
     </div>
