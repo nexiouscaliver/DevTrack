@@ -204,6 +204,24 @@ app.post("/api/git/branches", async (req, res) => {
   }
 });
 
+// =====================================================
+// POST /api/git/user — get git user.name & user.email for a repo
+// =====================================================
+app.post("/api/git/user", async (req, res) => {
+  const folderPath = validatePath(req, res);
+  if (!folderPath) return;
+
+  try {
+    const [name, email] = await Promise.all([
+      git(["config", "user.name"], folderPath),
+      git(["config", "user.email"], folderPath),
+    ]);
+    res.json({ name: name.trim(), email: email.trim() });
+  } catch {
+    res.json({ name: "", email: "" });
+  }
+});
+
 // --- Start server ---
 app.listen(PORT, () => {
   console.log(`DevTrack git server running on http://localhost:${PORT}`);

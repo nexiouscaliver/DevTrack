@@ -254,6 +254,120 @@ const sanitizeCell = (val) => {
   return str;
 };
 
+/**
+ * Estimate work hours from git commit timestamps.
+ * Groups consecutive commits into "work sessions" using gap-based detection,
+ * applies smart padding (ramp-up + cool-down), density adjustments for
+ * burst commits, and assigns confidence scores.
+ */
+const estimateWorkHours = (commits, config = {}) => {
+  const {
+    maxGap = 7200000,       // 2h — max gap between commits in same session
+    minSessionDuration = 900000, // 15min — floor for single-commit sessions
+    prePadding = 900000,    // 15min — ramp-up before first commit
+    postPadding = 600000,   // 10min — cool-down after last commit
+  } = config;
+
+  // Step 1: Filter merge commits & sort by timestamp
+  const filtered = commits
+    .filter((c) => !c.message?.startsWith("Merge "))
+    .sort((a, b) => a.timestamp - b.timestamp);
+
+  if (filtered.length === 0) return [];
+
+  // Step 2: Group consecutive commits into sessions by gap
+  const groups = [];
+  let current = [filtered[0]];
+
+  for (let i = 1; i < filtered.length; i++) {
+    const gap = filtered[i].timestamp - current[current.length - 1].timestamp;
+    if (gap <= maxGap) {
+      current.push(filtered[i]);
+    } else {
+      groups.push(current);
+      current = [filtered[i]];
+    }
+  }
+  groups.push(current);
+
+  // Step 3: Estimate duration per session
+  return groups.map((group) => {
+    const first = group[0];
+    const last = group[group.length - 1];
+    const rawStart = first.timestamp;
+    const rawEnd = last.timestamp;
+    const rawSpan = rawEnd - rawStart;
+
+    // Smart padding
+    let paddedStart = rawStart - prePadding;
+    let paddedEnd = rawEnd + postPadding;
+
+    // Density signals
+    const totalFiles = group.reduce((a, c) => a + (c.filesChanged || 0), 0);
+    const totalLines = group.reduce(
+      (a, c) => a + (c.insertions || 0) + (c.deletions || 0), 0,
+    );
+    const commitCount = group.length;
+
+    // Burst of activity in short time → extend
+    if (rawSpan < 1800000 && (totalFiles > 5 || commitCount >= 3)) {
+      paddedEnd = Math.max(paddedEnd, rawStart + 2700000); // extend to 45min
+    }
+    // Heavy changes crammed into short span → extend
+    if (totalLines > 500 && rawSpan < 3600000) {
+      paddedEnd = Math.max(paddedEnd, rawStart + 3600000); // extend to 60min
+    }
+
+    let estimatedDuration = paddedEnd - paddedStart;
+    // Floor: even single isolated commits represent at least minSessionDuration
+    estimatedDuration = Math.max(estimatedDuration, minSessionDuration);
+
+    // Confidence scoring
+    let confidence;
+    if (commitCount >= 3 && rawSpan >= 1800000) {
+      confidence = "high";
+    } else if (commitCount >= 2) {
+      confidence = "medium";
+    } else {
+      confidence = "low";
+    }
+
+    // Determine repo name — "multi-repo" if commits span multiple repos
+    const repos = [...new Set(group.map((c) => c.repo).filter(Boolean))];
+    const repoName = repos.length === 1 ? repos[0] : repos.length > 1 ? "multi-repo" : "";
+
+    return {
+      id: `est_${rawStart}_${commitCount}`,
+      start: paddedStart,
+      end: paddedEnd,
+      duration: estimatedDuration,
+      confidence,
+      commitCount,
+      repoName,
+      totalFiles,
+      totalLines,
+      notes: `${commitCount} commit${commitCount !== 1 ? "s" : ""}${repoName ? ` in ${repoName}` : ""}`,
+    };
+  });
+};
+
+/**
+ * Filter commits by author identity.
+ * mode: "all" → return everything, "me"/"us" → match against gitAuthors.identities
+ */
+const filterByAuthor = (commits, gitAuthors, mode) => {
+  if (mode === "all") return commits;
+  const identities = gitAuthors?.identities || [];
+  if (identities.length === 0) return commits;
+  return commits.filter((c) =>
+    identities.some(
+      (id) =>
+        (id.email && c.authorEmail?.toLowerCase() === id.email.toLowerCase()) ||
+        (id.name && c.author?.toLowerCase() === id.name.toLowerCase()),
+    ),
+  );
+};
+
 const STORAGE_KEY = "devtrack_data_v1";
 
 const DEFAULT_DATA = {
@@ -262,6 +376,10 @@ const DEFAULT_DATA = {
   settings: {
     dailyGoal: 8,
     trackedRepos: [],
+    gitAuthors: {
+      identities: [],
+      autoDetected: null,
+    },
   },
 };
 
@@ -507,6 +625,42 @@ export default function App() {
     setData((d) => ({ ...d, commits: [commit, ...d.commits] }));
   };
 
+  // Git-estimated session import
+  const importEstimatedSession = (est) => {
+    const session = {
+      id: `s_${Date.now()}`,
+      type: "work",
+      start: est.start,
+      end: est.end,
+      duration: est.duration,
+      tags: ["git-estimated", est.repoName].filter(Boolean),
+      notes: est.notes,
+      status: "completed",
+      _estimatedId: est.id,
+    };
+    setData((d) => ({ ...d, sessions: [...d.sessions, session] }));
+    showToast(`Imported git session: ${formatDuration(est.duration)}`);
+  };
+
+  const importAllEstimated = (sessions) => {
+    const newSessions = sessions.map((est) => ({
+      id: `s_${Date.now()}_${est.id}`,
+      type: "work",
+      start: est.start,
+      end: est.end,
+      duration: est.duration,
+      tags: ["git-estimated", est.repoName].filter(Boolean),
+      notes: est.notes,
+      status: "completed",
+      _estimatedId: est.id,
+    }));
+    setData((d) => ({ ...d, sessions: [...d.sessions, ...newSessions] }));
+    showToast(`Imported ${newSessions.length} git-estimated session${newSessions.length !== 1 ? "s" : ""}`);
+  };
+
+  const isImported = (estimatedId) =>
+    data.sessions.some((s) => s._estimatedId === estimatedId);
+
   // Stats
   const stats = useMemo(() => {
     const todaySessions = data.sessions.filter(
@@ -613,6 +767,19 @@ export default function App() {
     }
     return arr;
   }, [data.sessions, now]);
+
+  // Git-estimated work hours
+  const gitEstimatedSessions = useMemo(() => {
+    if (!data.commits || data.commits.length === 0) return [];
+    return estimateWorkHours(data.commits);
+  }, [data.commits]);
+
+  const gitEstimatedToday = useMemo(() => {
+    const todayStart = startOfDay(now);
+    return gitEstimatedSessions
+      .filter((s) => s.start >= todayStart)
+      .reduce((acc, s) => acc + s.duration, 0);
+  }, [gitEstimatedSessions, now]);
 
   const nav = [
     { id: "dashboard", label: "Dashboard", icon: ICONS.dashboard },
@@ -806,6 +973,8 @@ export default function App() {
                 pauseSession={pauseSession}
                 resumeSession={resumeSession}
                 setView={setView}
+                gitEstimatedToday={gitEstimatedToday}
+                gitEstimatedSessions={gitEstimatedSessions}
               />
             )}
             {view === "timer" && (
@@ -835,10 +1004,13 @@ export default function App() {
                 addCommit={addCommit}
                 setData={setData}
                 showToast={showToast}
+                importEstimatedSession={importEstimatedSession}
+                importAllEstimated={importAllEstimated}
+                isImported={isImported}
               />
             )}
             {view === "analytics" && (
-              <AnalyticsView data={data} weeklyData={weeklyData} />
+              <AnalyticsView data={data} weeklyData={weeklyData} gitEstimatedSessions={gitEstimatedSessions} />
             )}
             {view === "export" && (
               <ExportView data={data} showToast={showToast} />
@@ -869,6 +1041,8 @@ function Dashboard({
   startSession,
   pauseSession,
   resumeSession,
+  gitEstimatedToday,
+  gitEstimatedSessions,
 }) {
   const goal = data.settings.dailyGoal || 8;
   const workedHrs = (stats.totalToday / 3600000).toFixed(1);
@@ -985,6 +1159,59 @@ function Dashboard({
         />
       </div>
 
+      {/* Git-Estimated vs Tracked comparison */}
+      {gitEstimatedSessions && gitEstimatedSessions.length > 0 && (() => {
+        const estHrs = (gitEstimatedToday / 3600000).toFixed(1);
+        const trackedMs = stats.totalToday;
+        const trackedHrs = (trackedMs / 3600000).toFixed(1);
+        const goalMs = (data.settings.dailyGoal || 8) * 3600000;
+        const maxVal = Math.max(gitEstimatedToday, trackedMs, goalMs);
+        const trackedPct = maxVal > 0 ? (trackedMs / maxVal) * 100 : 0;
+        const estPct = maxVal > 0 ? (gitEstimatedToday / maxVal) * 100 : 0;
+        return (
+          <div className="bg-gradient-to-br from-violet-500/10 via-stone-900/50 to-stone-950 border border-violet-500/20 rounded-2xl p-5">
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2">
+                <Icon path={ICONS.github} size={18} className="text-violet-400" />
+                <span className="text-sm font-semibold text-violet-300">
+                  Git-Estimated vs Tracked
+                </span>
+              </div>
+              <span className="text-xs text-stone-500">today</span>
+            </div>
+            <div className="flex items-baseline gap-4 mb-3">
+              <div>
+                <span className="text-2xl font-bold text-white">{estHrs}h</span>
+                <span className="text-xs text-stone-400 ml-1">estimated</span>
+              </div>
+              <div className="text-stone-600">/</div>
+              <div>
+                <span className="text-2xl font-bold text-white">{trackedHrs}h</span>
+                <span className="text-xs text-stone-400 ml-1">tracked</span>
+              </div>
+            </div>
+            <div className="h-2 bg-stone-800 rounded-full overflow-hidden flex">
+              <div
+                className="bg-amber-500 rounded-l-full transition-all duration-500"
+                style={{ width: `${Math.min(trackedPct, 100)}%` }}
+              />
+              <div
+                className="bg-violet-500 rounded-r-full transition-all duration-500"
+                style={{ width: `${Math.min(estPct, 100)}%` }}
+              />
+            </div>
+            <div className="flex items-center gap-4 mt-2 text-xs text-stone-500">
+              <span className="flex items-center gap-1">
+                <span className="w-2 h-2 rounded-full bg-amber-500" /> Tracked
+              </span>
+              <span className="flex items-center gap-1">
+                <span className="w-2 h-2 rounded-full bg-violet-500" /> Estimated
+              </span>
+            </div>
+          </div>
+        );
+      })()}
+
       {/* Charts + Activity */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         <div className="col-span-1 md:col-span-2 bg-stone-900/50 border border-stone-800 rounded-2xl p-6">
@@ -1073,6 +1300,8 @@ function StatCard({ label, value, sub, icon, color, progress }) {
       "from-emerald-500/20 to-emerald-500/5 border-emerald-500/30 text-emerald-400",
     sky: "from-sky-500/20 to-sky-500/5 border-sky-500/30 text-sky-400",
     rose: "from-rose-500/20 to-rose-500/5 border-rose-500/30 text-rose-400",
+    violet:
+      "from-violet-500/20 to-violet-500/5 border-violet-500/30 text-violet-400",
   };
   return (
     <div
@@ -1384,6 +1613,9 @@ function TimerView({
                             >
                               <Icon path={ICONS.gitCommit} size={10} />
                               <span className="truncate">{commit.message}</span>
+                              <span className="text-stone-500 shrink-0 ml-auto">
+                                {formatTime(commit.timestamp)}
+                              </span>
                             </div>
                           );
                         })}
@@ -1579,8 +1811,11 @@ function SessionsView({ data, deleteSession, updateSession }) {
                                     <span className="truncate">
                                       {commit.message}
                                     </span>
+                                    <span className="text-stone-500 shrink-0 ml-auto">
+                                      {formatDate(commit.timestamp)} {formatTime(commit.timestamp)}
+                                    </span>
                                     {commit.repo && (
-                                      <span className="ml-auto text-stone-500 shrink-0">
+                                      <span className="text-stone-500 shrink-0">
                                         {commit.repo}
                                       </span>
                                     )}
@@ -1657,13 +1892,14 @@ function SessionsView({ data, deleteSession, updateSession }) {
 }
 
 // ============ GIT VIEW ============
-function GitView({ data, addCommit, setData, showToast }) {
+function GitView({ data, addCommit, setData, showToast, importEstimatedSession, importAllEstimated, isImported }) {
   const [repoPath, setRepoPath] = useState("");
   const [validating, setValidating] = useState(false);
   const [repoError, setRepoError] = useState("");
   const [syncingRepoId, setSyncingRepoId] = useState(null);
   const [serverStatus, setServerStatus] = useState(null); // "online" | "offline" | "no-git"
   const [repoFilter, setRepoFilter] = useState("all");
+  const [authorFilter, setAuthorFilter] = useState("all");
   const [manualCommit, setManualCommit] = useState({
     sha: "",
     message: "",
@@ -1815,15 +2051,41 @@ function GitView({ data, addCommit, setData, showToast }) {
   };
 
   // Filter commits by selected repo
+  // Author-filtered commits (applied before repo filter)
+  const authorFilteredCommits = useMemo(
+    () => filterByAuthor(data.commits, data.settings.gitAuthors, authorFilter),
+    [data.commits, data.settings.gitAuthors, authorFilter],
+  );
+
+  // Repo + author filtered commits
   const filteredCommits =
     repoFilter === "all"
-      ? data.commits
-      : data.commits.filter((c) => c.repo === repoFilter);
+      ? authorFilteredCommits
+      : authorFilteredCommits.filter((c) => c.repo === repoFilter);
 
-  // Unique repo names for filter dropdown
+  // Author-filtered estimated sessions & by-repo grouping
+  const filteredEstimates = useMemo(
+    () => estimateWorkHours(filterByAuthor(data.commits, data.settings.gitAuthors, authorFilter)),
+    [data.commits, data.settings.gitAuthors, authorFilter],
+  );
+
+  const filteredEstimatesByRepo = useMemo(() => {
+    const byRepo = {};
+    filteredEstimates.forEach((s) => {
+      const repo = s.repoName || "unknown";
+      if (!byRepo[repo]) byRepo[repo] = { total: 0, sessions: [] };
+      byRepo[repo].total += s.duration;
+      byRepo[repo].sessions.push(s);
+    });
+    return byRepo;
+  }, [filteredEstimates]);
+
+  // Unique repo names for filter dropdown (from all commits, not filtered)
   const repoNames = [
     ...new Set(data.commits.map((c) => c.repo).filter(Boolean)),
   ];
+
+  const hasIdentities = (data.settings.gitAuthors?.identities || []).length > 0;
 
   return (
     <div className="max-w-5xl mx-auto space-y-6">
@@ -1833,6 +2095,31 @@ function GitView({ data, addCommit, setData, showToast }) {
           Track commits from your local git repositories
         </p>
       </div>
+
+      {/* Author filter tabs */}
+      {data.commits.length > 0 && (
+        <div className="flex gap-1 bg-stone-900 border border-stone-800 p-1 rounded-xl w-fit">
+          {[
+            { id: "all", label: "All Work", icon: null },
+            { id: "me", label: "My Work", icon: null },
+            { id: "us", label: "Our Work", icon: null },
+          ].map((tab) => (
+            <button
+              key={tab.id}
+              onClick={() => setAuthorFilter(tab.id)}
+              disabled={tab.id !== "all" && !hasIdentities}
+              className={`px-4 py-1.5 rounded-lg text-sm capitalize transition-colors ${
+                authorFilter === tab.id
+                  ? "bg-violet-500 text-white"
+                  : "text-stone-400 hover:text-stone-200"
+              } ${tab.id !== "all" && !hasIdentities ? "opacity-30 cursor-not-allowed" : ""}`}
+              title={tab.id !== "all" && !hasIdentities ? "Add identities in Settings to filter" : ""}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* Server status banner */}
       {serverStatus === "offline" && (
@@ -2087,12 +2374,117 @@ function GitView({ data, addCommit, setData, showToast }) {
           ))}
         </div>
       </div>
+
+      {/* Estimated Work Hours */}
+      {filteredEstimates && filteredEstimates.length > 0 && (
+        <div className="bg-stone-900/50 border border-stone-800 rounded-2xl p-6">
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center gap-2">
+              <Icon path={ICONS.chart} size={16} className="text-violet-400" />
+              <h3 className="font-semibold">Estimated Work Hours</h3>
+              {authorFilter !== "all" && (
+                <span className="text-xs text-stone-500">
+                  ({authorFilter === "me" ? "My Work" : "Our Work"} filter)
+                </span>
+              )}
+            </div>
+            {filteredEstimates.length > 0 && (
+              <button
+                onClick={() => importAllEstimated(filteredEstimates.filter((s) => !isImported(s.id)))}
+                disabled={filteredEstimates.every((s) => isImported(s.id))}
+                className="px-3 py-1.5 rounded-lg bg-violet-500/20 hover:bg-violet-500/30 text-violet-300 text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+              >
+                Import All
+              </button>
+            )}
+          </div>
+
+          {/* Per-repo breakdown */}
+          {filteredEstimatesByRepo && Object.entries(filteredEstimatesByRepo).map(([repo, info]) => {
+            const repoHrs = (info.total / 3600000).toFixed(1);
+            const allImported = info.sessions.every((s) => isImported(s.id));
+            return (
+              <div key={repo} className="mb-4 last:mb-0">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-sm font-medium text-stone-200">{repo}</span>
+                  <span className="text-xs text-stone-400">
+                    {repoHrs}h · {info.sessions.length} session{info.sessions.length !== 1 ? "s" : ""}
+                  </span>
+                </div>
+                <div className="space-y-1.5">
+                  {info.sessions.map((est) => {
+                    const imported = isImported(est.id);
+                    const confidenceColor = est.confidence === "high"
+                      ? "bg-emerald-500/20 text-emerald-400"
+                      : est.confidence === "medium"
+                        ? "bg-amber-500/20 text-amber-400"
+                        : "bg-stone-500/20 text-stone-400";
+                    return (
+                      <div
+                        key={est.id}
+                        className="flex items-center gap-3 px-3 py-2 bg-stone-800/50 rounded-xl"
+                      >
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 text-sm">
+                            <span className="text-stone-300">
+                              {formatDate(est.start)} {formatTime(est.start)} – {formatTime(est.end)}
+                            </span>
+                            <span className={`text-[10px] px-1.5 py-0.5 rounded ${confidenceColor}`}>
+                              {est.confidence}
+                            </span>
+                          </div>
+                          <p className="text-xs text-stone-500 mt-0.5">
+                            {est.commitCount} commit{est.commitCount !== 1 ? "s" : ""}
+                            {est.totalLines > 0 && ` · ${est.totalLines} lines changed`}
+                            {" · "}{formatDuration(est.duration)}
+                          </p>
+                        </div>
+                        <button
+                          onClick={() => importEstimatedSession(est)}
+                          disabled={imported}
+                          className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-colors ${
+                            imported
+                              ? "bg-stone-700/50 text-stone-500 cursor-not-allowed"
+                              : "bg-violet-500/20 hover:bg-violet-500/30 text-violet-300"
+                          }`}
+                        >
+                          {imported ? "Imported" : "Import"}
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+                {!allImported && info.sessions.length > 1 && (
+                  <button
+                    onClick={() => importAllEstimated(info.sessions.filter((s) => !isImported(s.id)))}
+                    className="mt-2 text-xs text-violet-400 hover:text-violet-300 transition-colors"
+                  >
+                    Import all {repo} sessions
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Empty state when commits exist but no estimates (or filter yielded nothing) */}
+      {filteredEstimates && filteredEstimates.length === 0 && data.commits && data.commits.length > 0 && (
+        <div className="bg-stone-900/50 border border-stone-800 rounded-2xl p-6 text-center">
+          <Icon path={ICONS.chart} size={24} className="text-stone-600 mx-auto mb-2" />
+          <p className="text-sm text-stone-500">
+            {authorFilter !== "all"
+              ? "No matching commits for this filter. Try switching to \"All Work\" or add identities in Settings."
+              : "Sync commits to see estimated work hours"}
+          </p>
+        </div>
+      )}
     </div>
   );
 }
 
 // ============ ANALYTICS VIEW ============
-function AnalyticsView({ data }) {
+function AnalyticsView({ data, gitEstimatedSessions }) {
   const [range, setRange] = useState("week");
   const [now] = useState(() => Date.now());
 
@@ -2111,17 +2503,21 @@ function AnalyticsView({ data }) {
             s.start < dayEnd,
         )
         .reduce((a, s) => a + (s.totalWorkTime || s.duration), 0);
+      const gitWork = (gitEstimatedSessions || [])
+        .filter((s) => s.start >= dayStart && s.start < dayEnd)
+        .reduce((a, s) => a + s.duration, 0);
       arr.push({
         day:
           range === "week"
             ? dayName(dayStart)
             : `${new Date(dayStart).getDate()}/${new Date(dayStart).getMonth() + 1}`,
         hours: +(work / 3600000).toFixed(2),
+        gitHours: +(gitWork / 3600000).toFixed(2),
         date: dayStart,
       });
     }
     return arr;
-  }, [data.sessions, range, now]);
+  }, [data.sessions, range, now, gitEstimatedSessions]);
 
   const totalHrs = rangeData.reduce((a, r) => a + r.hours, 0);
   const avgHrs = (totalHrs / rangeData.length).toFixed(1);
@@ -2245,7 +2641,19 @@ function AnalyticsView({ data }) {
       </div>
 
       <div className="bg-stone-900/50 border border-stone-800 rounded-2xl p-6">
-        <h3 className="font-semibold mb-4">Work Hours Over Time</h3>
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="font-semibold">Work Hours Over Time</h3>
+          {gitEstimatedSessions && gitEstimatedSessions.length > 0 && (
+            <div className="flex items-center gap-3 text-xs text-stone-400">
+              <span className="flex items-center gap-1">
+                <span className="w-3 h-0.5 bg-amber-500 rounded" /> Tracked
+              </span>
+              <span className="flex items-center gap-1">
+                <span className="w-3 h-0.5 bg-violet-500 rounded border-dashed" /> Git Estimated
+              </span>
+            </div>
+          )}
+        </div>
         <ResponsiveContainer width="100%" height={300}>
           <LineChart data={rangeData}>
             <CartesianGrid strokeDasharray="3 3" stroke="#292524" />
@@ -2264,7 +2672,19 @@ function AnalyticsView({ data }) {
               stroke="#f59e0b"
               strokeWidth={2}
               dot={{ fill: "#f59e0b", r: 3 }}
+              name="Tracked Hours"
             />
+            {gitEstimatedSessions && gitEstimatedSessions.length > 0 && (
+              <Line
+                type="monotone"
+                dataKey="gitHours"
+                stroke="#8b5cf6"
+                strokeWidth={2}
+                strokeDasharray="5 5"
+                dot={{ fill: "#8b5cf6", r: 3 }}
+                name="Git Estimated"
+              />
+            )}
           </LineChart>
         </ResponsiveContainer>
       </div>
