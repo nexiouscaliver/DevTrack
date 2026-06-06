@@ -772,8 +772,9 @@ export default function App() {
   // Git-estimated work hours
   const gitEstimatedSessions = useMemo(() => {
     if (!data.commits || data.commits.length === 0) return [];
-    return estimateWorkHours(data.commits);
-  }, [data.commits]);
+    const filtered = filterByAuthor(data.commits, data.settings.gitAuthors);
+    return estimateWorkHours(filtered);
+  }, [data.commits, data.settings.gitAuthors]);
 
   const gitEstimatedToday = useMemo(() => {
     const todayStart = startOfDay(now);
@@ -1014,7 +1015,7 @@ export default function App() {
               <AnalyticsView data={data} weeklyData={weeklyData} gitEstimatedSessions={gitEstimatedSessions} />
             )}
             {view === "export" && (
-              <ExportView data={data} showToast={showToast} />
+              <ExportView data={data} gitAuthors={data.settings.gitAuthors} showToast={showToast} />
             )}
           </motion.div>
         </AnimatePresence>
@@ -1901,7 +1902,6 @@ function GitView({ data, addCommit, setData, showToast, importEstimatedSession, 
   const [syncingRepoId, setSyncingRepoId] = useState(null);
   const [serverStatus, setServerStatus] = useState(null); // "online" | "offline" | "no-git"
   const [repoFilter, setRepoFilter] = useState("all");
-  const [authorFilter, setAuthorFilter] = useState("all");
   const [manualCommit, setManualCommit] = useState({
     sha: "",
     message: "",
@@ -2086,24 +2086,22 @@ function GitView({ data, addCommit, setData, showToast, importEstimatedSession, 
     showToast("Commit added");
   };
 
-  // Filter commits by selected repo
-  // Author-filtered commits (applied before repo filter)
-  const authorFilteredCommits = useMemo(
+  // Filter commits by identity (always applied) then by selected repo
+  const identityFilteredCommits = useMemo(
     () => filterByAuthor(data.commits, data.settings.gitAuthors),
     [data.commits, data.settings.gitAuthors],
   );
 
-  // Repo + author filtered commits
   const filteredCommits =
     repoFilter === "all"
-      ? authorFilteredCommits
-      : authorFilteredCommits.filter((c) => c.repo === repoFilter);
+      ? identityFilteredCommits
+      : identityFilteredCommits.filter((c) => c.repo === repoFilter);
 
-  // Author-filtered estimated sessions (newest first)
+  // Identity-filtered estimated sessions (newest first)
   const filteredEstimates = useMemo(
-    () => estimateWorkHours(filterByAuthor(data.commits, data.settings.gitAuthors))
+    () => estimateWorkHours(identityFilteredCommits)
       .sort((a, b) => b.start - a.start),
-    [data.commits, data.settings.gitAuthors],
+    [identityFilteredCommits],
   );
 
   const filteredEstimatesByRepo = useMemo(() => {
@@ -2122,12 +2120,10 @@ function GitView({ data, addCommit, setData, showToast, importEstimatedSession, 
     );
   }, [filteredEstimates]);
 
-  // Unique repo names for filter dropdown (from all commits, not filtered)
+  // Unique repo names for filter dropdown (from identity-filtered commits)
   const repoNames = [
-    ...new Set(data.commits.map((c) => c.repo).filter(Boolean)),
+    ...new Set(identityFilteredCommits.map((c) => c.repo).filter(Boolean)),
   ];
-
-  const hasIdentities = (data.settings.gitAuthors?.identities || []).length > 0;
 
   return (
     <div className="max-w-5xl mx-auto space-y-6">
@@ -2137,35 +2133,6 @@ function GitView({ data, addCommit, setData, showToast, importEstimatedSession, 
           Track commits from your local git repositories
         </p>
       </div>
-
-      {/* Author filter tabs */}
-      {data.commits.length > 0 && (
-        <div className="flex gap-1 bg-stone-900 border border-stone-800 p-1 rounded-xl w-fit">
-          {[
-            { id: "all", label: "All Work" },
-            { id: "me", label: "My Work" },
-            { id: "us", label: "Our Work" },
-          ].map((tab) => (
-            <button
-              key={tab.id}
-              onClick={() => {
-                if (tab.id !== "all" && !hasIdentities) {
-                  showToast("Add your git identities in Settings → My Git Identities to filter by author", "error");
-                  return;
-                }
-                setAuthorFilter(tab.id);
-              }}
-              className={`px-4 py-1.5 rounded-lg text-sm capitalize transition-colors ${
-                authorFilter === tab.id && (tab.id === "all" || hasIdentities)
-                  ? "bg-violet-500 text-white"
-                  : "text-stone-400 hover:text-stone-200"
-              }`}
-            >
-              {tab.label}
-            </button>
-          ))}
-        </div>
-      )}
 
       {/* Server status banner */}
       {serverStatus === "offline" && (
@@ -2430,11 +2397,6 @@ function GitView({ data, addCommit, setData, showToast, importEstimatedSession, 
             <div className="flex items-center gap-2">
               <Icon path={ICONS.chart} size={16} className="text-violet-400" />
               <h3 className="font-semibold">Estimated Work Hours</h3>
-              {authorFilter !== "all" && (
-                <span className="text-xs text-stone-500">
-                  ({authorFilter === "me" ? "My Work" : "Our Work"} filter)
-                </span>
-              )}
             </div>
             {filteredEstimates.length > 0 && (
               <button
@@ -2521,9 +2483,7 @@ function GitView({ data, addCommit, setData, showToast, importEstimatedSession, 
         <div className="bg-stone-900/50 border border-stone-800 rounded-2xl p-6 text-center">
           <Icon path={ICONS.chart} size={24} className="text-stone-600 mx-auto mb-2" />
           <p className="text-sm text-stone-500">
-            {authorFilter !== "all"
-              ? "No matching commits for this filter. Try switching to \"All Work\" or add identities in Settings."
-              : "Sync commits to see estimated work hours"}
+            No matching commits for your git identities. Add identities in Settings &rarr; My Git Identities.
           </p>
         </div>
       )}
@@ -2801,7 +2761,7 @@ function AnalyticsView({ data, gitEstimatedSessions }) {
 }
 
 // ============ EXPORT VIEW ============
-function ExportView({ data, showToast }) {
+function ExportView({ data, gitAuthors, showToast }) {
   const [period, setPeriod] = useState("week");
   const [format, setFormat] = useState("xlsx");
 
@@ -2819,7 +2779,7 @@ function ExportView({ data, showToast }) {
     const sessions = data.sessions
       .filter((s) => s.status === "completed" && s.start >= cutoff)
       .filter((s) => !s.id.startsWith("demo_"));
-    const commits = (data.commits || []).filter((c) => c.timestamp >= cutoff);
+    const commits = filterByAuthor(data.commits || [], gitAuthors).filter((c) => c.timestamp >= cutoff);
 
     // Sheet 1: Executive Summary (smart boss-ready)
     const summary = [];
@@ -3218,7 +3178,7 @@ function SettingsModal({ open, onClose, data, updateSettings, setData, showToast
               </button>
             </div>
             <p className="text-[11px] text-stone-500 mb-3">
-              Commits from these authors appear as &quot;My Work&quot; in Git Tracking.
+              Commits from these authors are shown across all views — Git Tracking, Analytics, Dashboard &amp; Exports.
               Add your different work emails here.
             </p>
 
@@ -3230,7 +3190,9 @@ function SettingsModal({ open, onClose, data, updateSettings, setData, showToast
                     key={i}
                     className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-violet-500/15 text-violet-300 rounded-lg text-xs"
                   >
-                    {id.name || id.email}
+                    {id.name && id.email
+                      ? `${id.name} <${id.email}>`
+                      : id.name || id.email}
                     <button
                       onClick={() => removeIdentity(i)}
                       className="text-violet-400 hover:text-violet-200 transition-colors"
