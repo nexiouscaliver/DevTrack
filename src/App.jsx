@@ -1370,7 +1370,7 @@ function GitView({ data, addCommit, setData, showToast }) {
 function AnalyticsView({ data, weeklyData }) {
   const [range, setRange] = useState("week");
 
-  const getRangeData = () => {
+  const rangeData = useMemo(() => {
     const days = range === "week" ? 7 : range === "month" ? 30 : 365;
     const arr = [];
     for (let d = days - 1; d >= 0; d--) {
@@ -1395,26 +1395,54 @@ function AnalyticsView({ data, weeklyData }) {
       });
     }
     return arr;
-  };
+  }, [data.sessions, range]);
 
-  const rangeData = getRangeData();
   const totalHrs = rangeData.reduce((a, r) => a + r.hours, 0);
   const avgHrs = (totalHrs / rangeData.length).toFixed(1);
   const maxDay = Math.max(...rangeData.map((r) => r.hours));
 
-  // By tag breakdown
-  const tagBreakdown = {};
-  data.sessions
-    .filter((s) => s.status === "completed" && s.type === "work")
-    .forEach((s) => {
-      (s.tags || []).forEach((t) => {
-        tagBreakdown[t] = (tagBreakdown[t] || 0) + s.duration;
+  const { tagData, hourlyData } = useMemo(() => {
+    const rangeDays = range === "week" ? 7 : range === "month" ? 30 : 365;
+    const rangeCutoff = Date.now() - rangeDays * 86400000;
+
+    const tagBreakdown = {};
+    data.sessions
+      .filter(
+        (s) =>
+          s.status === "completed" &&
+          s.type === "work" &&
+          s.start >= rangeCutoff,
+      )
+      .forEach((s) => {
+        (s.tags || []).forEach((t) => {
+          tagBreakdown[t] = (tagBreakdown[t] || 0) + s.duration;
+        });
       });
-    });
-  const tagData = Object.entries(tagBreakdown).map(([name, value]) => ({
-    name,
-    value: +(value / 3600000).toFixed(2),
-  }));
+    const tagData = Object.entries(tagBreakdown).map(([name, value]) => ({
+      name,
+      value: +(value / 3600000).toFixed(2),
+    }));
+
+    const hourly = Array(24).fill(0);
+    data.sessions
+      .filter(
+        (s) =>
+          s.status === "completed" &&
+          s.type === "work" &&
+          s.start >= rangeCutoff,
+      )
+      .forEach((s) => {
+        const h = new Date(s.start).getHours();
+        hourly[h] += s.duration;
+      });
+    const hourlyData = hourly.map((v, i) => ({
+      hour: `${i}:00`,
+      minutes: +(v / 60000).toFixed(0),
+    }));
+
+    return { tagData, hourlyData };
+  }, [data.sessions, range]);
+
   const COLORS = [
     "#6366f1",
     "#a855f7",
@@ -1423,19 +1451,6 @@ function AnalyticsView({ data, weeklyData }) {
     "#10b981",
     "#06b6d4",
   ];
-
-  // Hourly heatmap
-  const hourly = Array(24).fill(0);
-  data.sessions
-    .filter((s) => s.status === "completed" && s.type === "work")
-    .forEach((s) => {
-      const h = new Date(s.start).getHours();
-      hourly[h] += s.duration;
-    });
-  const hourlyData = hourly.map((v, i) => ({
-    hour: `${i}:00`,
-    minutes: +(v / 60000).toFixed(0),
-  }));
 
   const completedSessions = data.sessions.filter(
     (s) => s.status === "completed",
