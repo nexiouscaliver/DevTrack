@@ -16,7 +16,7 @@ import {
   Tooltip,
   ResponsiveContainer,
 } from "recharts";
-import * as XLSX from "xlsx";
+import { generateExcelReport, generateCSVReport, getExportPreview } from "./utils/exportEngine";
 
 // Icons as SVG components
 const Icon = ({ path, size = 20, className = "" }) => (
@@ -245,14 +245,6 @@ const startOfDay = (ts) => {
   const d = new Date(ts);
   d.setHours(0, 0, 0, 0);
   return d.getTime();
-};
-
-const sanitizeCell = (val) => {
-  const str = String(val ?? "");
-  if (/^[=+\-@\t\r]/.test(str)) {
-    return "'" + str;
-  }
-  return str;
 };
 
 /**
@@ -2764,196 +2756,58 @@ function AnalyticsView({ data, gitEstimatedSessions }) {
 function ExportView({ data, gitAuthors, showToast }) {
   const [period, setPeriod] = useState("week");
   const [format, setFormat] = useState("xlsx");
+  const preview = useMemo(() => getExportPreview(data, period), [data, period]);
 
-  const exportExcel = () => {
-    const days =
-      period === "day"
-        ? 1
-        : period === "week"
-          ? 7
-          : period === "month"
-            ? 30
-            : 365;
-    const cutoff = Date.now() - days * 86400000;
-
-    const sessions = data.sessions
-      .filter((s) => s.status === "completed" && s.start >= cutoff)
-      .filter((s) => !s.id.startsWith("demo_"));
-    const commits = filterByAuthor(data.commits || [], gitAuthors).filter((c) => c.timestamp >= cutoff);
-
-    // Sheet 1: Executive Summary (smart boss-ready)
-    const summary = [];
-    for (let d = days - 1; d >= 0; d--) {
-      const dayStart = startOfDay(Date.now()) - d * 86400000;
-      const dayEnd = dayStart + 86400000;
-      const daySessions = sessions.filter(
-        (s) => s.start >= dayStart && s.start < dayEnd,
-      );
-      const work = daySessions.filter((s) => s.type === "work");
-      const firstStart = work[0]?.start;
-      const lastEnd = work[work.length - 1]?.end;
-      const workHrs = work.reduce((a, s) => a + (s.totalWorkTime || s.duration), 0) / 3600000;
-      // Break hours from pauses within work sessions
-      const breakHrs = work.reduce((a, s) => {
-        const breakMs = (s.pauses || []).reduce((sum, p) => sum + ((p.end || 0) - p.start), 0);
-        return a + breakMs;
-      }, 0) / 3600000;
-      const totalBreaks = work.reduce((a, s) => a + (s.pauses || []).filter((p) => p.end).length, 0);
-      const dayCommits = commits.filter(
-        (c) => c.timestamp >= dayStart && c.timestamp < dayEnd,
-      );
-
-      summary.push({
-        Date: formatDate(dayStart),
-        Day: dayName(dayStart),
-        "First Login": firstStart ? formatTime(firstStart) : "-",
-        "Last Logout": lastEnd ? formatTime(lastEnd) : "-",
-        Sessions: work.length,
-        Breaks: totalBreaks,
-        "Work Hours": +workHrs.toFixed(2),
-        "Break Hours": +breakHrs.toFixed(2),
-        Commits: dayCommits.length,
-        Notes: sanitizeCell(
-          work
-            .map((s) => s.notes)
-            .filter(Boolean)
-            .join("; "),
-        ),
-      });
+  const handleExport = () => {
+    const exportData = {
+      ...data,
+      commits: filterByAuthor(data.commits || [], gitAuthors),
+    };
+    if (format === "xlsx") {
+      generateExcelReport(exportData, period);
+    } else {
+      generateCSVReport(exportData, period);
     }
-
-    // Sheet 2: Detailed Intervals
-    const intervals = sessions.map((s) => {
-      const breakMs = (s.pauses || []).reduce((sum, p) => sum + ((p.end || 0) - p.start), 0);
-      const workMs = (s.totalWorkTime || s.duration || 0);
-      return {
-        Date: formatDate(s.start),
-        "Start Time": formatTime(s.start),
-        "End Time": formatTime(s.end),
-        "Total Duration (min)": +((s.duration || 0) / 60000).toFixed(1),
-        "Work Time (min)": +(workMs / 60000).toFixed(1),
-        "Break Time (min)": +(breakMs / 60000).toFixed(1),
-        Breaks: (s.pauses || []).filter((p) => p.end).length,
-        Type: s.type,
-        Tags: sanitizeCell((s.tags || []).join(", ")),
-        Notes: sanitizeCell(s.notes || ""),
-      };
-    });
-
-    // Sheet 3: Git Activity
-    const gitSheet = commits.map((c) => ({
-      Date: formatDate(c.timestamp),
-      Time: formatTime(c.timestamp),
-      Repository: sanitizeCell(c.repo),
-      Branch: c.branch || "",
-      Author: c.author || "",
-      SHA: c.sha,
-      Message: sanitizeCell(c.message),
-      "Files Changed": c.filesChanged ?? "",
-      "+Lines": c.insertions ?? "",
-      "-Lines": c.deletions ?? "",
-      Source: c.source || "manual",
-    }));
-
-    // Sheet 4: Totals
-    const totals = [
-      {
-        Period: `Last ${period}`,
-        "Total Work Hours": +summary
-          .reduce((a, r) => a + r["Work Hours"], 0)
-          .toFixed(2),
-        "Total Break Hours": +summary
-          .reduce((a, r) => a + r["Break Hours"], 0)
-          .toFixed(2),
-        "Avg Daily Hours": +(
-          summary.reduce((a, r) => a + r["Work Hours"], 0) / days
-        ).toFixed(2),
-        "Total Sessions": summary.reduce((a, r) => a + r["Sessions"], 0),
-        "Total Commits": summary.reduce((a, r) => a + r["Commits"], 0),
-        "Exported On": new Date().toLocaleString(),
-      },
-    ];
-
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(
-      wb,
-      XLSX.utils.json_to_sheet(totals),
-      "Summary",
-    );
-    XLSX.utils.book_append_sheet(
-      wb,
-      XLSX.utils.json_to_sheet(summary),
-      "Daily Overview",
-    );
-    XLSX.utils.book_append_sheet(
-      wb,
-      XLSX.utils.json_to_sheet(intervals),
-      "Detailed Intervals",
-    );
-    XLSX.utils.book_append_sheet(
-      wb,
-      XLSX.utils.json_to_sheet(gitSheet),
-      "Git Activity",
-    );
-
-    XLSX.writeFile(
-      wb,
-      `DevTrack_Report_${period}_${formatDate(Date.now()).replace(/\//g, "-")}.xlsx`,
-    );
-    showToast("Report exported!");
-  };
-
-  const exportCSV = () => {
-    const days =
-      period === "day"
-        ? 1
-        : period === "week"
-          ? 7
-          : period === "month"
-            ? 30
-            : 365;
-    const cutoff = Date.now() - days * 86400000;
-    const sessions = data.sessions
-      .filter((s) => s.status === "completed" && s.start >= cutoff)
-      .filter((s) => !s.id.startsWith("demo_"));
-
-    const rows = [
-      ["Date", "Start", "End", "Duration (min)", "Type", "Tags", "Notes"],
-    ];
-    sessions.forEach((s) => {
-      rows.push([
-        formatDate(s.start),
-        formatTime(s.start),
-        formatTime(s.end),
-        +((s.duration || 0) / 60000).toFixed(1),
-        s.type,
-        (s.tags || []).join("; "),
-        s.notes || "",
-      ]);
-    });
-    const csv = rows
-      .map((r) =>
-        r
-          .map((c) => `"${sanitizeCell(c).replace(/"/g, '""')}"`)
-          .join(","),
-      )
-      .join("\n");
-    const blob = new Blob([csv], { type: "text/csv" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `DevTrack_${period}_${Date.now()}.csv`;
-    a.click();
-    showToast("CSV exported!");
+    showToast(`${format === "xlsx" ? "Excel" : "CSV"} report exported!`);
   };
 
   return (
     <div className="max-w-4xl mx-auto space-y-6">
       <div>
-        <h2 className="text-2xl font-bold">Export Smart Report</h2>
+        <h2 className="text-2xl font-bold">Export Report</h2>
         <p className="text-stone-400">
-          Generate professional reports for your manager
+          Generate professional, enterprise-grade reports
         </p>
+      </div>
+
+      {/* Export Preview Card */}
+      <div className="bg-gradient-to-br from-stone-900/80 to-stone-900/50 border border-stone-800 rounded-2xl p-6">
+        <h3 className="font-semibold mb-4 flex items-center gap-2">
+          <Icon path={ICONS.clock} size={18} /> Export Preview
+        </h3>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <div className="bg-stone-800/60 rounded-xl p-3 text-center">
+            <p className="text-xs text-stone-500 uppercase tracking-wide">Period</p>
+            <p className="text-lg font-bold text-white mt-1">{period.charAt(0).toUpperCase() + period.slice(1)}</p>
+            <p className="text-[10px] text-stone-500 mt-0.5">{preview.days} days</p>
+          </div>
+          <div className="bg-stone-800/60 rounded-xl p-3 text-center">
+            <p className="text-xs text-stone-500 uppercase tracking-wide">Sessions</p>
+            <p className="text-lg font-bold text-amber-400 mt-1">{preview.totalSessions}</p>
+            <p className="text-[10px] text-stone-500 mt-0.5">{preview.totalHours}h tracked</p>
+          </div>
+          <div className="bg-stone-800/60 rounded-xl p-3 text-center">
+            <p className="text-xs text-stone-500 uppercase tracking-wide">Commits</p>
+            <p className="text-lg font-bold text-emerald-400 mt-1">{preview.totalCommits}</p>
+            <p className="text-[10px] text-stone-500 mt-0.5">{preview.repoCount} repos</p>
+          </div>
+          <div className="bg-stone-800/60 rounded-xl p-3 text-center">
+            <p className="text-xs text-stone-500 uppercase tracking-wide">Tags</p>
+            <p className="text-lg font-bold text-blue-400 mt-1">{preview.tagCount}</p>
+            <p className="text-[10px] text-stone-500 mt-0.5 truncate">{preview.tags.slice(0, 3).join(", ")}{preview.tagCount > 3 ? "…" : ""}</p>
+          </div>
+        </div>
+        <p className="text-xs text-stone-500 mt-3 text-center">{preview.dateRange}</p>
       </div>
 
       <div className="bg-stone-900/50 border border-stone-800 rounded-2xl p-6">
@@ -3002,43 +2856,79 @@ function ExportView({ data, gitAuthors, showToast }) {
           </div>
 
           <button
-            onClick={format === "xlsx" ? exportExcel : exportCSV}
-            className="w-full py-4 rounded-xl bg-gradient-to-r from-amber-500 to-orange-600 hover:from-amber-600 hover:to-orange-700 font-semibold flex items-center justify-center gap-2 shadow-lg shadow-amber-500/30"
+            onClick={handleExport}
+            disabled={preview.totalSessions === 0 && preview.totalCommits === 0}
+            className="w-full py-4 rounded-xl bg-gradient-to-r from-amber-500 to-orange-600 hover:from-amber-600 hover:to-orange-700 disabled:from-stone-700 disabled:to-stone-700 disabled:cursor-not-allowed font-semibold flex items-center justify-center gap-2 shadow-lg shadow-amber-500/30 disabled:shadow-none transition-all"
           >
-            <Icon path={ICONS.download} size={20} /> Generate & Download Report
+            <Icon path={ICONS.download} size={20} /> Generate & Download {format === "xlsx" ? "Excel" : "CSV"} Report
           </button>
         </div>
       </div>
 
       <div className="bg-stone-900/50 border border-stone-800 rounded-2xl p-6">
         <h3 className="font-semibold mb-4 flex items-center gap-2">
-          <Icon path={ICONS.clipboard} size={18} /> What's included in the Excel
+          <Icon path={ICONS.clipboard} size={18} /> {format === "xlsx" ? "6 Professional Sheets" : "What's Included"}
         </h3>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          {[
+          {(format === "xlsx" ? [
             {
-              title: "Summary",
-              desc: "Period totals, averages, export timestamp",
+              title: "Dashboard",
+              desc: "Executive summary — key metrics, tag distribution, visual KPIs",
+              accent: "text-amber-300",
             },
             {
-              title: "Daily Overview",
-              desc: "First login, last logout, work/break hours per day",
+              title: "Timesheet",
+              desc: "Enterprise timesheet grid with clock in/out, overtime flags, daily subtotals",
+              accent: "text-emerald-300",
             },
             {
-              title: "Detailed Intervals",
-              desc: "Every start/pause/resume with tags & notes",
+              title: "Daily Summary",
+              desc: "Day-by-day breakdown with goal tracking, variance, and status indicators",
+              accent: "text-blue-300",
+            },
+            {
+              title: "Tag Analysis",
+              desc: "Project/tag breakdown with hours, sessions, avg duration, % of total",
+              accent: "text-purple-300",
             },
             {
               title: "Git Activity",
-              desc: "All commits synced during the period",
+              desc: "All commits with SHA, repo, branch, lines changed, author details",
+              accent: "text-orange-300",
             },
-          ].map((s) => (
+            {
+              title: "Raw Data",
+              desc: "Unformatted session & commit data for data portability and re-import",
+              accent: "text-stone-300",
+            },
+          ] : [
+            {
+              title: "Metadata Header",
+              desc: "Period, total hours, session count, generation timestamp",
+              accent: "text-amber-300",
+            },
+            {
+              title: "Enhanced Sessions",
+              desc: "All sessions with computed fields: day name, goal status, variance",
+              accent: "text-emerald-300",
+            },
+            {
+              title: "Git Commits",
+              desc: "All commits with full metadata as comment-prefixed section",
+              accent: "text-blue-300",
+            },
+          ]).map((s) => (
             <div key={s.title} className="p-4 bg-stone-800/50 rounded-xl">
-              <p className="font-medium text-amber-300">{s.title}</p>
+              <p className={`font-medium ${s.accent}`}>{s.title}</p>
               <p className="text-xs text-stone-400 mt-1">{s.desc}</p>
             </div>
           ))}
         </div>
+        {format === "xlsx" && (
+          <p className="text-xs text-stone-500 mt-4 text-center">
+            Professional styling with color-coded headers, alternating rows, freeze panes, auto-filters, and duration formatting
+          </p>
+        )}
       </div>
     </div>
   );
