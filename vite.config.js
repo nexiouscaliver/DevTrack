@@ -6,5 +6,11 @@ export default defineConfig({
   plugins: [react()],
   server: {
     port: 9000,
+    proxy: {
+      "/api/git": {
+        target: "http://localhost:9001",
+        changeOrigin: true,
+      },
+    },
   },
 });
