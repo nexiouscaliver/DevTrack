@@ -275,9 +275,12 @@ export default function App() {
     }
   }, []);
 
+  const toastTimer = useRef(null);
+
   const showToast = (msg, type = "success") => {
+    if (toastTimer.current) clearTimeout(toastTimer.current);
     setToast({ msg, type });
-    setTimeout(() => setToast(null), 2500);
+    toastTimer.current = setTimeout(() => setToast(null), 3000);
   };
 
   const startSession = (type = "work", tags = [], notes = "") => {
@@ -297,7 +300,7 @@ export default function App() {
     showToast(`${type === "work" ? "💼 Work" : "☕ Break"} session started`);
   };
 
-  const pauseSession = () => {
+  const stopSession = () => {
     if (!activeSession) return;
     const now = Date.now();
     const ended = {
@@ -312,7 +315,7 @@ export default function App() {
     }));
     setActiveSession(null);
     setElapsed(0);
-    showToast("Session paused ✓");
+    showToast("Session completed ✓");
   };
 
   const deleteSession = (id) => {
@@ -511,9 +514,10 @@ export default function App() {
                 activeSession={activeSession}
                 elapsed={elapsed}
                 startSession={startSession}
-                pauseSession={pauseSession}
+                pauseSession={stopSession}
                 updateSession={updateSession}
                 data={data}
+                showToast={showToast}
               />
             )}
             {view === "sessions" && (
@@ -789,6 +793,7 @@ function TimerView({
   pauseSession,
   updateSession,
   data,
+  showToast,
 }) {
   const [tags, setTags] = useState("");
   const [notes, setNotes] = useState("");
@@ -816,6 +821,7 @@ function TimerView({
           .map((t) => t.trim())
           .filter(Boolean),
       });
+    showToast("Notes saved");
   };
 
   useEffect(() => {
@@ -928,7 +934,7 @@ function TimerView({
                 onClick={pauseSession}
                 className="flex-1 py-3 rounded-xl bg-amber-500 hover:bg-amber-600 font-semibold flex items-center justify-center gap-2"
               >
-                <Icon path={ICONS.pause} size={18} /> Pause
+                <Icon path={ICONS.stop} size={18} /> Stop Session
               </button>
               <button
                 onClick={saveSessionNotes}
