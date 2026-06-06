@@ -812,13 +812,13 @@ function Dashboard({
             <div className="flex gap-3 mt-5">
               <button
                 onClick={() => startSession("work", [], "")}
-                className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-indigo-500 to-purple-600 hover:from-indigo-600 hover:to-purple-700 font-medium shadow-lg shadow-indigo-500/30 flex items-center gap-2"
+                className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-indigo-500 to-purple-600 hover:from-indigo-600 hover:to-purple-700 font-medium shadow-lg shadow-indigo-500/30 flex items-center gap-2 active:scale-[0.98] transition-transform"
               >
                 <Icon path={ICONS.play} size={16} /> Start Work
               </button>
               <button
                 onClick={() => startSession("break", [], "")}
-                className="px-5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 font-medium flex items-center gap-2"
+                className="px-5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 font-medium flex items-center gap-2 active:scale-[0.98] transition-transform"
               >
                 <Icon path={ICONS.coffee} size={16} /> Take a Break
               </button>
@@ -1034,6 +1034,16 @@ function TimerView({
           <div className="w-48 h-48 sm:w-56 sm:h-56 md:w-64 md:h-64 rounded-full border-4 border-slate-800 flex items-center justify-center relative">
             {activeSession && (
               <svg className="absolute inset-0 w-full h-full -rotate-90" viewBox="0 0 256 256">
+                {/* Background track */}
+                <circle
+                  cx="128"
+                  cy="128"
+                  r="124"
+                  fill="none"
+                  stroke="#1e293b"
+                  strokeWidth="4"
+                />
+                {/* Goal progress arc */}
                 <circle
                   cx="128"
                   cy="128"
@@ -1041,7 +1051,7 @@ function TimerView({
                   fill="none"
                   stroke="url(#timerGrad)"
                   strokeWidth="4"
-                  strokeDasharray={`${((elapsed % 3600000) / 3600000) * 779} 779`}
+                  strokeDasharray={`${Math.min(((elapsed) / ((data.settings.dailyGoal || 8) * 3600000)) * 779, 779)} 779`}
                   strokeLinecap="round"
                 />
                 <defs>
@@ -1095,7 +1105,7 @@ function TimerView({
             />
             <button
               onClick={handleStart}
-              className="w-full py-3 rounded-xl bg-gradient-to-r from-indigo-500 to-purple-600 hover:from-indigo-600 hover:to-purple-700 font-semibold flex items-center justify-center gap-2 shadow-lg shadow-indigo-500/30"
+              className="w-full py-3 rounded-xl bg-gradient-to-r from-indigo-500 to-purple-600 hover:from-indigo-600 hover:to-purple-700 font-semibold flex items-center justify-center gap-2 shadow-lg shadow-indigo-500/30 active:scale-[0.98] transition-transform"
             >
               <Icon path={ICONS.play} size={18} /> Start Session
             </button>
@@ -1277,7 +1287,7 @@ function SessionsView({ data, deleteSession, updateSession }) {
                   <motion.div
                     key={s.id}
                     layout
-                    className="bg-slate-900/50 border border-slate-800 rounded-xl p-4 flex items-center gap-4"
+                    className="bg-slate-900/50 border border-slate-800 rounded-xl p-4 flex items-center gap-4 hover:bg-slate-800/40 hover:border-slate-700 transition-colors"
                   >
                     <div
                       className={`w-1 self-stretch rounded ${s.type === "work" ? "bg-indigo-400" : "bg-amber-400"}`}
