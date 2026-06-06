@@ -564,6 +564,30 @@ function Dashboard({
 }) {
   const goal = data.settings.dailyGoal || 8;
   const workedHrs = (stats.totalToday / 3600000).toFixed(1);
+  const isFirstTime = stats.totalToday === 0 && stats.streak === 0;
+
+  if (isFirstTime) {
+    return (
+      <div className="max-w-7xl mx-auto">
+        <div className="flex flex-col items-center justify-center py-24 text-center">
+          <div className="w-20 h-20 rounded-2xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center shadow-lg shadow-indigo-500/30 mb-6">
+            <Icon path={ICONS.zap} size={36} className="text-white" />
+          </div>
+          <h1 className="text-3xl font-bold mb-3">Welcome to DevTrack</h1>
+          <p className="text-slate-400 max-w-md mb-8">
+            Track your work sessions, analyze productivity patterns, and generate
+            professional reports. Start your first session to get going.
+          </p>
+          <button
+            onClick={() => startSession("work", [], "")}
+            className="px-8 py-3.5 rounded-xl bg-gradient-to-r from-indigo-500 to-purple-600 hover:from-indigo-600 hover:to-purple-700 font-semibold text-lg shadow-lg shadow-indigo-500/30 flex items-center gap-3"
+          >
+            <Icon path={ICONS.play} size={20} /> Start Your First Session
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="max-w-7xl mx-auto space-y-6">
@@ -1018,6 +1042,21 @@ function SessionsView({ data, deleteSession, updateSession }) {
       </div>
 
       <div className="space-y-6">
+        {Object.keys(grouped).length === 0 && (
+          <div className="flex flex-col items-center justify-center py-20 text-center">
+            <Icon path={ICONS.list} size={40} className="text-slate-600 mb-4" />
+            <h3 className="text-xl font-semibold text-slate-300 mb-2">
+              {data.sessions.length === 0
+                ? "No sessions yet"
+                : "No matching sessions"}
+            </h3>
+            <p className="text-slate-500 max-w-sm">
+              {data.sessions.length === 0
+                ? "Start your first work session from the Timer or Dashboard to begin tracking your time."
+                : "Try adjusting your search or filter to find what you're looking for."}
+            </p>
+          </div>
+        )}
         {Object.entries(grouped).map(([date, sessions]) => {
           const dayWork = sessions
             .filter((s) => s.type === "work")
@@ -1391,6 +1430,26 @@ function AnalyticsView({ data, weeklyData }) {
     hour: `${i}:00`,
     minutes: +(v / 60000).toFixed(0),
   }));
+
+  const completedSessions = data.sessions.filter(
+    (s) => s.status === "completed",
+  );
+  if (completedSessions.length === 0) {
+    return (
+      <div className="max-w-7xl mx-auto">
+        <div className="flex flex-col items-center justify-center py-24 text-center">
+          <Icon path={ICONS.chart} size={40} className="text-slate-600 mb-4" />
+          <h3 className="text-xl font-semibold text-slate-300 mb-2">
+            No data yet
+          </h3>
+          <p className="text-slate-500 max-w-sm">
+            Complete some work sessions to see your productivity analytics and
+            work patterns here.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="max-w-7xl mx-auto space-y-6">
