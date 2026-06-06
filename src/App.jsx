@@ -357,8 +357,9 @@ export default function App() {
 
     // Streaks - consecutive days with >= goal hours
     const goalMs = (data.settings.dailyGoal || 8) * 3600000;
-    let streak = 0;
-    for (let d = 0; d < 60; d++) {
+    let currentStreak = 0;
+    let bestStreak = 0;
+    for (let d = 0; d < 365; d++) {
       const dayStart = startOfDay(Date.now()) - d * 86400000;
       const dayEnd = dayStart + 86400000;
       const dayWork = data.sessions
@@ -370,9 +371,14 @@ export default function App() {
             s.start < dayEnd,
         )
         .reduce((a, s) => a + s.duration, 0);
-      if (dayWork >= goalMs) streak++;
-      else if (d > 0) break;
+      if (dayWork >= goalMs || (d === 0 && dayWork > 0)) {
+        currentStreak++;
+      } else if (currentStreak > 0) {
+        if (currentStreak > bestStreak) bestStreak = currentStreak;
+        currentStreak = 0;
+      }
     }
+    if (currentStreak > bestStreak) bestStreak = currentStreak;
 
     return {
       totalToday,
@@ -380,7 +386,8 @@ export default function App() {
       sessionsToday: workToday.length,
       totalWeek,
       goalProgress: Math.min(100, (totalToday / goalMs) * 100),
-      streak,
+      streak: currentStreak,
+      bestStreak,
       sessions: data.sessions,
     };
   }, [data]);
@@ -665,7 +672,7 @@ function Dashboard({
         <StatCard
           label="Streak"
           value={`${stats.streak}d`}
-          sub="consecutive"
+          sub={`best: ${stats.bestStreak}d`}
           icon={ICONS.fire}
           color="rose"
         />
