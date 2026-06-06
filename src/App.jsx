@@ -360,6 +360,10 @@ const DEFAULT_DATA = {
     dailyGoal: 8,
     idleMinutes: 10,
     trackedRepos: [],
+    gitAuthors: {
+      identities: [],
+      autoDetected: null,
+    },
   },
 };
 
@@ -1454,6 +1458,9 @@ function TimerView({
                           >
                             <Icon path={ICONS.gitCommit} size={10} />
                             <span className="truncate">{commit.message}</span>
+                            <span className="text-stone-500 shrink-0 ml-auto">
+                              {formatTime(commit.timestamp)}
+                            </span>
                           </div>
                         );
                       })}
@@ -1636,8 +1643,11 @@ function SessionsView({ data, deleteSession, updateSession }) {
                                     <span className="truncate">
                                       {commit.message}
                                     </span>
+                                    <span className="text-stone-500 shrink-0 ml-auto">
+                                      {formatDate(commit.timestamp)} {formatTime(commit.timestamp)}
+                                    </span>
                                     {commit.repo && (
-                                      <span className="ml-auto text-stone-500 shrink-0">
+                                      <span className="text-stone-500 shrink-0">
                                         {commit.repo}
                                       </span>
                                     )}
