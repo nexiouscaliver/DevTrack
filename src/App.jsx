@@ -198,112 +198,55 @@ const startOfDay = (ts) => {
 };
 
 const STORAGE_KEY = "devtrack_data_v1";
+
+const DEFAULT_DATA = {
+  sessions: [],
+  commits: [],
+  settings: {
+    dailyGoal: 8,
+    githubToken: "",
+    githubUser: "",
+    idleMinutes: 10,
+  },
+};
+
 const load = () => {
   try {
-    return JSON.parse(localStorage.getItem(STORAGE_KEY)) || {};
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (
+      !parsed ||
+      !Array.isArray(parsed.sessions) ||
+      !Array.isArray(parsed.commits) ||
+      !parsed.settings ||
+      typeof parsed.settings !== "object"
+    ) {
+      return null;
+    }
+    return parsed;
   } catch {
-    return {};
+    return null;
   }
 };
-const save = (data) => localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
 
-// Seed demo data if empty
-const seedData = () => {
-  const now = Date.now();
-  const sessions = [];
-  // Add demo sessions for past 14 days
-  for (let d = 13; d >= 0; d--) {
-    const dayStart = startOfDay(now) - d * 86400000;
-    const numSessions = Math.floor(Math.random() * 3) + 2;
-    let cursor = dayStart + 9 * 3600000 + Math.random() * 3600000;
-    for (let i = 0; i < numSessions; i++) {
-      const dur = (Math.random() * 90 + 30) * 60000;
-      sessions.push({
-        id: `demo_${d}_${i}`,
-        type: "work",
-        start: cursor,
-        end: cursor + dur,
-        duration: dur,
-        tags: [
-          ["Deep Work", "Coding", "Meeting", "Research", "Review"][
-            Math.floor(Math.random() * 5)
-          ],
-        ],
-        notes: [
-          "Implemented feature X",
-          "Fixed bugs",
-          "Code review",
-          "Planning session",
-        ][Math.floor(Math.random() * 4)],
-        status: "completed",
-      });
-      cursor += dur + (Math.random() * 20 + 5) * 60000;
+const save = (data) => {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+  } catch (e) {
+    if (
+      e instanceof DOMException &&
+      (e.name === "QuotaExceededError" || e.code === 22)
+    ) {
+      console.error("DevTrack: localStorage quota exceeded. Data not saved.");
+    } else {
+      throw e;
     }
   }
-  // Add today's sessions
-  const todayStart = startOfDay(now);
-  sessions.push({
-    id: "today_1",
-    type: "work",
-    start: todayStart + 9 * 3600000,
-    end: todayStart + 10.5 * 3600000,
-    duration: 1.5 * 3600000,
-    tags: ["Deep Work"],
-    notes: "Morning sprint planning",
-    status: "completed",
-  });
-  sessions.push({
-    id: "today_2",
-    type: "work",
-    start: todayStart + 11 * 3600000,
-    end: todayStart + 12.5 * 3600000,
-    duration: 1.5 * 3600000,
-    tags: ["Coding"],
-    notes: "Feature implementation",
-    status: "completed",
-  });
-  return {
-    sessions,
-    commits: [
-      {
-        sha: "a1b2c3d",
-        message: "feat: add tracking module",
-        repo: "devtrack",
-        timestamp: now - 3600000,
-      },
-      {
-        sha: "e4f5g6h",
-        message: "fix: timer state bug",
-        repo: "devtrack",
-        timestamp: now - 7200000,
-      },
-      {
-        sha: "i7j8k9l",
-        message: "refactor: excel export",
-        repo: "reports",
-        timestamp: now - 10800000,
-      },
-    ],
-    settings: {
-      dailyGoal: 8,
-      githubToken: "",
-      githubUser: "",
-      idleMinutes: 10,
-    },
-    streaks: { current: 5, best: 12 },
-  };
 };
 
 export default function App() {
-  const [data, setData] = useState(() => {
-    const d = load();
-    if (!d.sessions || d.sessions.length === 0) {
-      const seeded = seedData();
-      save(seeded);
-      return seeded;
-    }
-    return d;
-  });
+  const [data, setData] = useState(() => load() || DEFAULT_DATA);
   const [view, setView] = useState("dashboard");
   const [activeSession, setActiveSession] = useState(null);
   const [elapsed, setElapsed] = useState(0);
@@ -1599,9 +1542,9 @@ function ExportView({ data, showToast }) {
             : 365;
     const cutoff = Date.now() - days * 86400000;
 
-    const sessions = data.sessions.filter(
-      (s) => s.status === "completed" && s.start >= cutoff,
-    );
+    const sessions = data.sessions
+      .filter((s) => s.status === "completed" && s.start >= cutoff)
+      .filter((s) => !s.id.startsWith("demo_"));
     const commits = (data.commits || []).filter((c) => c.timestamp >= cutoff);
 
     // Sheet 1: Executive Summary (smart boss-ready)
@@ -1718,9 +1661,9 @@ function ExportView({ data, showToast }) {
             ? 30
             : 365;
     const cutoff = Date.now() - days * 86400000;
-    const sessions = data.sessions.filter(
-      (s) => s.status === "completed" && s.start >= cutoff,
-    );
+    const sessions = data.sessions
+      .filter((s) => s.status === "completed" && s.start >= cutoff)
+      .filter((s) => !s.id.startsWith("demo_"));
 
     const rows = [
       ["Date", "Start", "End", "Duration (min)", "Type", "Tags", "Notes"],
@@ -1905,7 +1848,7 @@ function SettingsModal({ open, onClose, data, updateSettings, setData }) {
               onClick={() => {
                 if (confirm("Clear all data? This cannot be undone.")) {
                   localStorage.removeItem(STORAGE_KEY);
-                  setData(seedData());
+                  setData(DEFAULT_DATA);
                   onClose();
                 }
               }}
