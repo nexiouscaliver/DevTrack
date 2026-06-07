@@ -754,7 +754,7 @@ export default function App() {
   // Load once and derive all initial state from it
   const [initialData] = useState(() => load());
   const [data, setData] = useState(() => initialData || DEFAULT_DATA);
-  const [now] = useState(() => Date.now());
+  const [now, setNow] = useState(() => Date.now());
   const [view, setView] = useState(() => initialData?.ui?.view || "dashboard");
   const [activeSession, setActiveSession] = useState(() => {
     const running = (initialData?.sessions || []).find((s) => s.status === "running" || s.status === "paused");
@@ -1008,6 +1008,12 @@ export default function App() {
     const id = setInterval(tick, 1000);
     return () => clearInterval(id);
   }, [activeSession]);
+
+  // Keep `now` fresh so dashboard stats, streak, and weekly chart stay accurate
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 60000);
+    return () => clearInterval(id);
+  }, []);
 
   // Session checkpoint — every 30 s while a session is active, persist a checkpoint
   // so that on crash/reload the pause state is at most 30 s inaccurate.
