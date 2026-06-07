@@ -264,6 +264,29 @@ const formatTime = (ts) =>
   new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 const formatDate = (ts) =>
   new Date(ts).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
+
+const parseTimeInput = (input) => {
+  const match = input.match(/^(\d{1,2}):(\d{2})\s*(am|pm)$/i);
+  if (!match) return null;
+  let h = parseInt(match[1]); let m = parseInt(match[2]); const period = match[3];
+  if (m >= 60 || h < 1 || h > 12) return null;
+  const periodLower = period.toLowerCase();
+  if (h === 12) h = 0;
+  if (periodLower === 'pm') h += 12;
+  const d = new Date();
+  d.setHours(h, m, 0, 0);
+  return d.getTime();
+};
+
+const formatTimeForInput = (ts) => {
+  const d = new Date(ts);
+  let h = d.getHours();
+  const m = d.getMinutes().toString().padStart(2, '0');
+  const period = h >= 12 ? 'PM' : 'AM';
+  h = h % 12 || 12;
+  return `${h}:${m} ${period}`;
+};
+
 const isToday = (ts) => {
   const d = new Date(ts),
     n = new Date();
@@ -638,7 +661,16 @@ export default function App() {
       notes,
       status: "running",
       pauses: [],
+      checkpoints: [],
     };
+    if (notes && notes.trim()) {
+      session.checkpoints = [{
+        id: `cp_${session.start}_initial`,
+        text: notes.trim(),
+        ts: session.start,
+        private: false,
+      }];
+    }
     setActiveSession(session);
     setElapsed(0);
     setData((d) => ({ ...d, sessions: [...d.sessions, session] }));
@@ -865,6 +897,7 @@ export default function App() {
       notes: est.notes,
       status: "completed",
       _estimatedId: est.id,
+      checkpoints: [],
     };
     setData((d) => ({ ...d, sessions: [...d.sessions, session] }));
     showToast(`Imported git session: ${formatDuration(est.duration)}`);
@@ -881,6 +914,7 @@ export default function App() {
       notes: est.notes,
       status: "completed",
       _estimatedId: est.id,
+      checkpoints: [],
     }));
     setData((d) => ({ ...d, sessions: [...d.sessions, ...newSessions] }));
     showToast(`Imported ${newSessions.length} git-estimated session${newSessions.length !== 1 ? "s" : ""}`);
@@ -1215,7 +1249,9 @@ export default function App() {
                 pauseSession={pauseSession}
                 resumeSession={resumeSession}
                 stopSession={stopSession}
-                updateSession={updateSession}
+                addCheckpoint={addCheckpoint}
+                updateCheckpoint={updateCheckpoint}
+                deleteCheckpoint={deleteCheckpoint}
                 data={data}
                 showToast={showToast}
               />
@@ -1584,12 +1620,18 @@ function TimerView({
   pauseSession,
   resumeSession,
   stopSession,
-  updateSession,
+  addCheckpoint,
+  updateCheckpoint,
+  deleteCheckpoint,
   data,
   showToast,
 }) {
   const [tags, setTags] = useState(() => activeSession?.tags?.join(", ") || "");
   const [notes, setNotes] = useState(() => activeSession?.notes || "");
+  const [cpInput, setCpInput] = useState("");
+  const [editingCpId, setEditingCpId] = useState(null);
+  const [editCpData, setEditCpData] = useState({ text: "", tsInput: "" });
+  const timelineRef = useRef(null);
 
   const handleStart = () => {
     startSession(
@@ -1604,16 +1646,51 @@ function TimerView({
     setNotes("");
   };
 
-  const saveSessionNotes = () => {
-    if (activeSession)
-      updateSession(activeSession.id, {
-        notes,
-        tags: tags
-          .split(",")
-          .map((t) => t.trim())
-          .filter(Boolean),
-      });
-    showToast("Notes saved");
+  const handleAddCp = () => {
+    const text = cpInput.trim();
+    if (!text || !activeSession) return;
+    addCheckpoint(activeSession.id, text);
+    setCpInput("");
+    setTimeout(() => {
+      if (timelineRef.current) timelineRef.current.scrollTop = 0;
+    }, 50);
+  };
+
+  const handleEditCp = (cp) => {
+    setEditingCpId(cp.id);
+    setEditCpData({ text: cp.text, tsInput: formatTimeForInput(cp.ts) });
+  };
+
+  const handleSaveCp = (cp) => {
+    const parsed = editCpData.tsInput ? parseTimeInput(editCpData.tsInput) : cp.ts;
+    if (editCpData.tsInput && parsed === null) {
+      showToast("Invalid time format — use h:mm AM/PM", "error");
+      return;
+    }
+    // Guard: cancel if checkpoint no longer exists
+    if (activeSession && !(activeSession.checkpoints || []).some((c) => c.id === cp.id)) {
+      setEditingCpId(null);
+      return;
+    }
+    updateCheckpoint(activeSession.id, cp.id, { text: editCpData.text.trim(), ts: parsed });
+    setEditingCpId(null);
+    setEditCpData({ text: "", tsInput: "" });
+  };
+
+  const handleCancelEditCp = () => {
+    setEditingCpId(null);
+    setEditCpData({ text: "", tsInput: "" });
+  };
+
+  const handleDeleteCp = (cp) => {
+    if (confirm("Delete this checkpoint?")) {
+      deleteCheckpoint(activeSession.id, cp.id);
+      if (editingCpId === cp.id) handleCancelEditCp();
+    }
+  };
+
+  const handleTogglePrivate = (cp) => {
+    updateCheckpoint(activeSession.id, cp.id, { private: !cp.private });
   };
 
   // Compute work elapsed when running (elapsed already excludes pauses via timer tick)
@@ -1747,12 +1824,13 @@ function TimerView({
                       className="w-full pl-9 pr-3 py-2 bg-stone-900/80 border border-stone-700/50 rounded-lg text-sm focus:outline-none focus:border-amber-500/60 focus:ring-1 focus:ring-amber-500/20 placeholder:text-stone-600"
                     />
                   </div>
-                  <textarea
+                  <input
+                    type="text"
                     value={notes}
                     onChange={(e) => setNotes(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter' && (notes.trim() || tags.trim())) handleStart(); }}
                     placeholder="What are you working on?"
-                    rows={2}
-                    className="w-full px-3 py-2 bg-stone-900/80 border border-stone-700/50 rounded-lg text-sm focus:outline-none focus:border-amber-500/60 focus:ring-1 focus:ring-amber-500/20 resize-none placeholder:text-stone-600"
+                    className="w-full px-3 py-2 bg-stone-900/80 border border-stone-700/50 rounded-lg text-sm focus:outline-none focus:border-amber-500/60 focus:ring-1 focus:ring-amber-500/20 placeholder:text-stone-600"
                   />
                 </div>
                 <button
@@ -1776,14 +1854,106 @@ function TimerView({
                       className="w-full pl-9 pr-3 py-2 bg-stone-900/80 border border-stone-700/50 rounded-lg text-sm focus:outline-none focus:border-amber-500/60 focus:ring-1 focus:ring-amber-500/20 placeholder:text-stone-600"
                     />
                   </div>
-                  <textarea
-                    value={notes}
-                    onChange={(e) => setNotes(e.target.value)}
-                    placeholder="Notes..."
-                    rows={2}
-                    className="w-full px-3 py-2 bg-stone-900/80 border border-stone-700/50 rounded-lg text-sm focus:outline-none focus:border-amber-500/60 focus:ring-1 focus:ring-amber-500/20 resize-none placeholder:text-stone-600"
-                  />
                 </div>
+
+                {/* Checkpoint timeline */}
+                <div className="bg-stone-800/60 border border-stone-700/60 rounded-xl p-3">
+                  {/* Add checkpoint input */}
+                  <div className="flex gap-2">
+                    <input
+                      value={cpInput}
+                      onChange={(e) => setCpInput(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === 'Enter' && cpInput.trim()) handleAddCp(); }}
+                      placeholder="Add checkpoint..."
+                      maxLength={280}
+                      className="flex-1 px-3 py-1.5 bg-stone-900/80 border border-stone-700/50 rounded-lg text-sm text-stone-200 placeholder:text-stone-600 focus:outline-none focus:border-amber-500/50"
+                    />
+                    <button
+                      onClick={handleAddCp}
+                      disabled={!cpInput.trim()}
+                      className="px-3 py-1.5 rounded-lg bg-amber-500/20 text-amber-400 text-sm font-medium hover:bg-amber-500/30 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1"
+                    >
+                      <Icon path={ICONS.plus} size={14} /> Add
+                    </button>
+                  </div>
+
+                  {/* Timeline entries */}
+                  {(activeSession.checkpoints || []).length > 0 ? (
+                    <div className="mt-3 max-h-60 overflow-y-auto space-y-1.5 pr-1" ref={timelineRef}>
+                      {[...(activeSession.checkpoints || [])].reverse().map((cp) => (
+                        <div key={cp.id} className="group flex items-start gap-2 py-1">
+                          <span className="mt-1.5 w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0" />
+                          {editingCpId === cp.id ? (
+                            <div className="flex-1 space-y-1.5">
+                              <input
+                                type="text"
+                                value={editCpData.text}
+                                onChange={(e) => setEditCpData((d) => ({ ...d, text: e.target.value }))}
+                                className="w-full px-2 py-1 bg-stone-900/80 border border-stone-700/50 rounded text-xs text-stone-200 focus:outline-none focus:border-amber-500/50"
+                              />
+                              <div className="flex items-center gap-1.5">
+                                <input
+                                  type="text"
+                                  value={editCpData.tsInput}
+                                  onChange={(e) => setEditCpData((d) => ({ ...d, tsInput: e.target.value }))}
+                                  placeholder="h:mm AM/PM"
+                                  className="w-24 px-2 py-1 bg-stone-900/80 border border-stone-700/50 rounded text-xs text-stone-200 focus:outline-none focus:border-amber-500/50"
+                                />
+                                <button
+                                  onClick={() => handleSaveCp(cp)}
+                                  className="px-2 py-1 text-xs rounded bg-amber-500/20 text-amber-400 hover:bg-amber-500/30"
+                                >Save</button>
+                                <button
+                                  onClick={handleCancelEditCp}
+                                  className="px-2 py-1 text-xs rounded bg-stone-700/50 text-stone-400 hover:bg-stone-700"
+                                >Cancel</button>
+                              </div>
+                            </div>
+                          ) : (
+                            <>
+                              <div className="flex-1 min-w-0">
+                                <span className="text-xs text-stone-400">{formatTime(cp.ts)}</span>
+                                <p className="text-sm text-stone-200 break-words">{cp.text}</p>
+                              </div>
+                              <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
+                                <button
+                                  onClick={() => handleTogglePrivate(cp)}
+                                  className="p-0.5 rounded hover:bg-stone-700/50"
+                                  title={cp.private ? "Make visible" : "Make private"}
+                                >
+                                  <Icon
+                                    path={cp.private ? ICONS.eyeOff : ICONS.eye}
+                                    size={12}
+                                    className={cp.private ? "text-stone-500" : "text-amber-400"}
+                                  />
+                                </button>
+                                <button
+                                  onClick={() => handleEditCp(cp)}
+                                  className="p-0.5 rounded hover:bg-stone-700/50 text-stone-500 hover:text-stone-300"
+                                  title="Edit"
+                                >
+                                  <Icon path={ICONS.edit} size={12} />
+                                </button>
+                                <button
+                                  onClick={() => handleDeleteCp(cp)}
+                                  className="p-0.5 rounded hover:bg-stone-700/50 text-stone-500 hover:text-rose-400"
+                                  title="Delete"
+                                >
+                                  <Icon path={ICONS.trash} size={12} />
+                                </button>
+                              </div>
+                            </>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-stone-600 text-xs text-center py-3">
+                      Add checkpoints to track your progress
+                    </p>
+                  )}
+                </div>
+
                 <div className="flex gap-2">
                   {isPaused ? (
                     <button
@@ -1801,14 +1971,8 @@ function TimerView({
                     </button>
                   )}
                   <button
-                    onClick={saveSessionNotes}
-                    className="px-4 py-2.5 rounded-xl bg-stone-800 hover:bg-stone-700 text-sm font-medium flex items-center justify-center gap-1.5 border border-stone-700/50 active:scale-[0.98] transition-all text-stone-300 hover:text-stone-100"
-                  >
-                    <Icon path={ICONS.check} size={14} /> Save
-                  </button>
-                  <button
                     onClick={stopSession}
-                    className="px-4 py-2.5 rounded-xl bg-stone-800 hover:bg-rose-900/40 text-sm font-medium flex items-center justify-center gap-1.5 border border-stone-700/50 hover:border-rose-500/30 active:scale-[0.98] transition-all text-stone-300 hover:text-rose-300"
+                    className="flex-1 py-2.5 rounded-xl bg-stone-800 hover:bg-rose-900/40 text-sm font-medium flex items-center justify-center gap-1.5 border border-stone-700/50 hover:border-rose-500/30 active:scale-[0.98] transition-all text-stone-300 hover:text-rose-300"
                   >
                     <Icon path={ICONS.stop} size={14} /> Finish
                   </button>
