@@ -1858,7 +1858,7 @@ function Dashboard({
 }) {
   const goal = data.settings.dailyGoal || 8;
   const workedHrs = (stats.totalToday / 3600000).toFixed(1);
-  const isFirstTime = stats.totalToday === 0 && stats.streak === 0;
+  const isFirstTime = data.sessions.length === 0;
 
   if (isFirstTime) {
     return (
