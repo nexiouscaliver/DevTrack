@@ -1315,6 +1315,7 @@ export default function App() {
                 initialPeriod={data.ui?.exportPeriod || "week"}
                 initialFormat={data.ui?.exportFormat || "xlsx"}
                 onPrefsChange={({ period, format }) => updateUi({ exportPeriod: period, exportFormat: format })}
+                updateUi={updateUi}
               />
             )}
           </motion.div>
@@ -3373,15 +3374,19 @@ function AnalyticsView({ data, gitEstimatedSessions, initialRange, onRangeChange
 }
 
 // ============ EXPORT VIEW ============
-function ExportView({ data, gitAuthors, showToast, initialPeriod, initialFormat, onPrefsChange }) {
+function ExportView({ data, gitAuthors, showToast, initialPeriod, initialFormat, onPrefsChange, updateUi }) {
   const [period, setPeriod] = useState(initialPeriod || "week");
   const [format, setFormat] = useState(initialFormat || "xlsx");
+  const [includeCheckpoints, setIncludeCheckpoints] = useState(data.ui?.exportIncludeCheckpoints ?? true);
+  const [includeWorkLog, setIncludeWorkLog] = useState(data.ui?.exportIncludeWorkLog ?? true);
   const preview = useMemo(() => getExportPreview(data, period), [data, period]);
 
   const handleExport = () => {
     const exportData = {
       ...data,
       commits: filterByAuthor(data.commits || [], gitAuthors),
+      includeCheckpoints,
+      includeWorkLog,
     };
     if (format === "xlsx") {
       generateExcelReport(exportData, period);
@@ -3472,6 +3477,32 @@ function ExportView({ data, gitAuthors, showToast, initialPeriod, initialFormat,
                   <Icon path={ICONS.fileText} size={16} /> CSV
                 </span>
               </button>
+            </div>
+          </div>
+
+          <div>
+            <label className="text-xs text-stone-400 uppercase tracking-wide">Checkpoint Notes</label>
+            <div className="mt-2 space-y-2">
+              <label className="flex items-start gap-3 p-3 bg-stone-800/60 rounded-xl cursor-pointer">
+                <input type="checkbox" checked={includeCheckpoints} onChange={(e) => {
+                  setIncludeCheckpoints(e.target.checked);
+                  updateUi?.({ exportIncludeCheckpoints: e.target.checked });
+                }} className="mt-0.5 accent-amber-500" />
+                <div>
+                  <p className="text-sm font-medium">In-session checkpoints</p>
+                  <p className="text-xs text-stone-500">Adds a "Checkpoints" column to Raw Data and Timesheet sheets. Private notes excluded automatically.</p>
+                </div>
+              </label>
+              <label className="flex items-start gap-3 p-3 bg-stone-800/60 rounded-xl cursor-pointer">
+                <input type="checkbox" checked={includeWorkLog} onChange={(e) => {
+                  setIncludeWorkLog(e.target.checked);
+                  updateUi?.({ exportIncludeWorkLog: e.target.checked });
+                }} className="mt-0.5 accent-amber-500" />
+                <div>
+                  <p className="text-sm font-medium">Standalone work log notes</p>
+                  <p className="text-xs text-stone-500">Adds a "Work Log" sheet with all standalone entries. Private notes excluded automatically.</p>
+                </div>
+              </label>
             </div>
           </div>
 
