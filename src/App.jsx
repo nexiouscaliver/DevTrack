@@ -396,6 +396,7 @@ const STORAGE_KEY = "devtrack_data_v1";
 const DEFAULT_DATA = {
   sessions: [],
   commits: [],
+  workLog: [],
   settings: {
     dailyGoal: 8,
     trackedRepos: [],
@@ -454,6 +455,22 @@ function migrate(parsed) {
   }));
   // Add UI preferences (spread merge ensures forward compatibility with new fields)
   parsed.ui = { ...DEFAULT_DATA.ui, ...(parsed.ui || {}) };
+
+  // Migrate session checkpoints — backfill from notes
+  parsed.sessions = parsed.sessions.map((s) => ({
+    ...s,
+    checkpoints: s.checkpoints || (
+      s.notes && s.notes.trim() && s.start && !isNaN(s.start)
+        ? [{ id: `cp_${s.start}_migrated`, text: s.notes.trim(), ts: s.start, private: false }]
+        : []
+    ),
+  }));
+
+  // Add workLog array if missing
+  if (!parsed.workLog) {
+    parsed.workLog = [];
+  }
+
   return parsed;
 }
 
@@ -695,6 +712,11 @@ export default function App() {
             c.timestamp <= now,
         );
         ended.commitIds = sessionCommits.map((c) => c.sha);
+        // Read latest checkpoints from data to prevent data loss
+        // if addCheckpoint fired in the same tick
+        const latestSession = d.sessions.find((s) => s.id === current.id);
+        const checkpoints = latestSession?.checkpoints || current.checkpoints || [];
+        ended.checkpoints = checkpoints;
         return {
           ...d,
           sessions: d.sessions.map((s) => (s.id === current.id ? ended : s)),
@@ -720,6 +742,98 @@ export default function App() {
     setActiveSession((prev) =>
       prev && prev.id === id ? { ...prev, ...updates } : prev,
     );
+  }, []);
+
+  // ── Checkpoint & Work Log mutation helpers ──
+
+  const addCheckpoint = useCallback((sessionId, text, ts = Date.now()) => {
+    const checkpoint = {
+      id: `cp_${ts}_${Math.random().toString(36).slice(2, 6)}`,
+      text: text.trim(),
+      ts,
+      private: false,
+    };
+    setData((d) => ({
+      ...d,
+      sessions: d.sessions.map((s) =>
+        s.id === sessionId
+          ? { ...s, checkpoints: [...(s.checkpoints || []), checkpoint].sort((a, b) => a.ts - b.ts) }
+          : s
+      ),
+    }));
+    setActiveSession((prev) =>
+      prev && prev.id === sessionId
+        ? { ...prev, checkpoints: [...(prev.checkpoints || []), checkpoint].sort((a, b) => a.ts - b.ts) }
+        : prev
+    );
+  }, []);
+
+  const updateCheckpoint = useCallback((sessionId, checkpointId, updates) => {
+    setData((d) => ({
+      ...d,
+      sessions: d.sessions.map((s) =>
+        s.id === sessionId
+          ? {
+              ...s,
+              checkpoints: (s.checkpoints || [])
+                .map((cp) => cp.id === checkpointId ? { ...cp, ...updates } : cp)
+                .sort((a, b) => a.ts - b.ts),
+            }
+          : s
+      ),
+    }));
+    setActiveSession((prev) =>
+      prev && prev.id === sessionId
+        ? {
+            ...prev,
+            checkpoints: (prev.checkpoints || [])
+              .map((cp) => cp.id === checkpointId ? { ...cp, ...updates } : cp)
+              .sort((a, b) => a.ts - b.ts),
+          }
+        : prev
+    );
+  }, []);
+
+  const deleteCheckpoint = useCallback((sessionId, checkpointId) => {
+    setData((d) => ({
+      ...d,
+      sessions: d.sessions.map((s) =>
+        s.id === sessionId
+          ? { ...s, checkpoints: (s.checkpoints || []).filter((cp) => cp.id !== checkpointId) }
+          : s
+      ),
+    }));
+    setActiveSession((prev) =>
+      prev && prev.id === sessionId
+        ? { ...prev, checkpoints: (prev.checkpoints || []).filter((cp) => cp.id !== checkpointId) }
+        : prev
+    );
+  }, []);
+
+  const addWorkLogEntry = useCallback((text, ts = Date.now()) => {
+    const entry = {
+      id: `wl_${ts}_${Math.random().toString(36).slice(2, 6)}`,
+      text: text.trim(),
+      ts,
+      private: false,
+    };
+    setData((d) => ({ ...d, workLog: [...(d.workLog || []), entry] }));
+  }, []);
+
+  const updateWorkLogEntry = useCallback((entryId, updates) => {
+    setData((d) => ({
+      ...d,
+      workLog: (d.workLog || []).map((e) =>
+        e.id === entryId ? { ...e, ...updates } : e
+      ),
+    }));
+  }, []);
+
+  const deleteWorkLogEntry = useCallback((entryId) => {
+    setData((d) => ({
+      ...d,
+      workLog: (d.workLog || []).filter((e) => e.id !== entryId),
+    }));
   }, []);
 
   const updateSettings = (updates) => {
