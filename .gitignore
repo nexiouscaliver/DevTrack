@@ -29,3 +29,11 @@ server/data/
 # Worktrees
 .worktrees/
 .superpowers/
+
+# Dev tools (not part of the app)
+scripts/
+docs/
+claudedocs/
+.playwright-mcp/
+timer-before.png
+.claude/
