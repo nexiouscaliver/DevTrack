@@ -1266,6 +1266,10 @@ export default function App() {
                 updateSession={updateSession}
                 initialFilter={data.ui?.sessionsFilter || "all"}
                 onFilterChange={(f) => updateUi({ sessionsFilter: f })}
+                addCheckpoint={addCheckpoint}
+                updateCheckpoint={updateCheckpoint}
+                deleteCheckpoint={deleteCheckpoint}
+                showToast={showToast}
               />
             )}
             {view === "git" && (
@@ -2095,11 +2099,68 @@ function TimerView({
 }
 
 // ============ SESSIONS VIEW ============
-function SessionsView({ data, deleteSession, updateSession, initialFilter, onFilterChange }) {
+function SessionsView({ data, deleteSession, updateSession, initialFilter, onFilterChange, addCheckpoint, updateCheckpoint, deleteCheckpoint, showToast }) {
   const [filter, setFilter] = useState(initialFilter || "all");
   const [search, setSearch] = useState("");
   const [editingId, setEditingId] = useState(null);
   const [editData, setEditData] = useState({});
+
+  // ── Checkpoint UI state ──
+  const [expandedSessionCps, setExpandedSessionCps] = useState(new Set());
+  const [cpInputs, setCpInputs] = useState({});
+  const [editingCp, setEditingCp] = useState(null); // { sessionId, cpId, text, tsInput }
+
+  // ── Checkpoint handlers ──
+  const toggleSessionCpExpand = (sessionId) => {
+    setExpandedSessionCps((prev) => {
+      const next = new Set(prev);
+      if (next.has(sessionId)) next.delete(sessionId);
+      else next.add(sessionId);
+      return next;
+    });
+  };
+
+  const handleAddCp = useCallback((sessionId) => {
+    const text = (cpInputs[sessionId] || "").trim();
+    if (!text) return;
+    const s = data.sessions.find((sess) => sess.id === sessionId);
+    const now = Date.now();
+    const defaultTs = s ? (s.end || now) : now;
+    addCheckpoint(sessionId, text, defaultTs);
+    setCpInputs((prev) => ({ ...prev, [sessionId]: "" }));
+  }, [cpInputs, data.sessions, addCheckpoint]);
+
+  const handleEditCp = (sessionId, cp) => {
+    setEditingCp({ sessionId, cpId: cp.id, text: cp.text, tsInput: formatTimeForInput(cp.ts) });
+  };
+
+  const handleSaveCp = () => {
+    if (!editingCp) return;
+    const parsed = editingCp.tsInput ? parseTimeInput(editingCp.tsInput) : null;
+    if (editingCp.tsInput && parsed === null) {
+      showToast("Invalid time format — use h:mm AM/PM", "error");
+      return;
+    }
+    const updates = { text: editingCp.text.trim() };
+    if (parsed !== null) updates.ts = parsed;
+    updateCheckpoint(editingCp.sessionId, editingCp.cpId, updates);
+    setEditingCp(null);
+  };
+
+  const handleCancelEditCp = () => {
+    setEditingCp(null);
+  };
+
+  const handleDeleteCp = (sessionId, cpId) => {
+    if (confirm("Delete this checkpoint?")) {
+      deleteCheckpoint(sessionId, cpId);
+      if (editingCp && editingCp.cpId === cpId) handleCancelEditCp();
+    }
+  };
+
+  const handleTogglePrivate = (sessionId, cp) => {
+    updateCheckpoint(sessionId, cp.id, { private: !cp.private });
+  };
 
   const filtered = useMemo(
     () =>
@@ -2188,8 +2249,10 @@ function SessionsView({ data, deleteSession, updateSession, initialFilter, onFil
                   <motion.div
                     key={s.id}
                     layout
-                    className="bg-stone-900/50 border border-stone-800 rounded-xl p-4 flex items-center gap-4 hover:bg-stone-800/40 hover:border-stone-700 transition-colors"
+                    className="bg-stone-900/50 border border-stone-800 rounded-xl p-4 hover:bg-stone-800/40 hover:border-stone-700 transition-colors"
                   >
+                    {/* Main row: color bar | content | duration | actions */}
+                    <div className="flex items-center gap-4">
                     <div
                       className={`w-1 self-stretch rounded ${s.type === "work" ? "bg-amber-400" : "bg-sky-400"}`}
                     />
@@ -2327,6 +2390,111 @@ function SessionsView({ data, deleteSession, updateSession, initialFilter, onFil
                     >
                       <Icon path={ICONS.trash} size={16} />
                     </button>
+                    </div>
+
+                    {/* ── Collapsible checkpoints section ── */}
+                    {(s.checkpoints || []).length > 0 && (
+                      <div className="mt-3 pt-3 border-t border-stone-800/60">
+                        <button
+                          onClick={() => toggleSessionCpExpand(s.id)}
+                          className="flex items-center gap-1.5 text-xs text-stone-400 hover:text-stone-300"
+                        >
+                          <Icon path={expandedSessionCps.has(s.id) ? ICONS.chevronDown : ICONS.chevronRight} size={12} />
+                          <Icon path={ICONS.flag} size={12} className="text-amber-500/60" />
+                          {(s.checkpoints || []).length} checkpoint{(s.checkpoints || []).length !== 1 ? "s" : ""}
+                        </button>
+
+                        {expandedSessionCps.has(s.id) && (
+                          <div className="mt-2 ml-5 space-y-1.5">
+                            {(s.checkpoints || []).map((cp) => (
+                              <div key={cp.id} className="group flex items-start gap-2 py-1">
+                                <span className="mt-1.5 w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0" />
+                                {editingCp && editingCp.cpId === cp.id ? (
+                                  <div className="flex-1 space-y-1.5">
+                                    <input
+                                      type="text"
+                                      value={editingCp.text}
+                                      onChange={(e) => setEditingCp((prev) => ({ ...prev, text: e.target.value }))}
+                                      className="w-full px-2 py-1 bg-stone-900/80 border border-stone-700/50 rounded text-xs text-stone-200 focus:outline-none focus:border-amber-500/50"
+                                    />
+                                    <div className="flex items-center gap-1.5">
+                                      <input
+                                        type="text"
+                                        value={editingCp.tsInput}
+                                        onChange={(e) => setEditingCp((prev) => ({ ...prev, tsInput: e.target.value }))}
+                                        placeholder="h:mm AM/PM"
+                                        className="w-24 px-2 py-1 bg-stone-900/80 border border-stone-700/50 rounded text-xs text-stone-200 focus:outline-none focus:border-amber-500/50"
+                                      />
+                                      <button
+                                        onClick={handleSaveCp}
+                                        className="px-2 py-1 text-xs rounded bg-amber-500/20 text-amber-400 hover:bg-amber-500/30"
+                                      >Save</button>
+                                      <button
+                                        onClick={handleCancelEditCp}
+                                        className="px-2 py-1 text-xs rounded bg-stone-700/50 text-stone-400 hover:bg-stone-700"
+                                      >Cancel</button>
+                                    </div>
+                                  </div>
+                                ) : (
+                                  <>
+                                    <div className="flex-1 min-w-0">
+                                      <span className="text-xs text-stone-400">{formatTime(cp.ts)}</span>
+                                      <p className="text-sm text-stone-200 break-words">{cp.text}</p>
+                                    </div>
+                                    <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
+                                      <button
+                                        onClick={() => handleTogglePrivate(s.id, cp)}
+                                        className="p-0.5 rounded hover:bg-stone-700/50"
+                                        title={cp.private ? "Make visible" : "Make private"}
+                                      >
+                                        <Icon
+                                          path={cp.private ? ICONS.eyeOff : ICONS.eye}
+                                          size={12}
+                                          className={cp.private ? "text-stone-500" : "text-amber-400"}
+                                        />
+                                      </button>
+                                      <button
+                                        onClick={() => handleEditCp(s.id, cp)}
+                                        className="p-0.5 rounded hover:bg-stone-700/50 text-stone-500 hover:text-stone-300"
+                                        title="Edit"
+                                      >
+                                        <Icon path={ICONS.edit} size={12} />
+                                      </button>
+                                      <button
+                                        onClick={() => handleDeleteCp(s.id, cp.id)}
+                                        className="p-0.5 rounded hover:bg-stone-700/50 text-stone-500 hover:text-rose-400"
+                                        title="Delete"
+                                      >
+                                        <Icon path={ICONS.trash} size={12} />
+                                      </button>
+                                    </div>
+                                  </>
+                                )}
+                              </div>
+                            ))}
+
+                            {/* Add checkpoint input (for completed sessions) */}
+                            <div className="flex gap-2 mt-2">
+                              <input
+                                value={cpInputs[s.id] || ""}
+                                onChange={(e) => setCpInputs((prev) => ({ ...prev, [s.id]: e.target.value }))}
+                                onKeyDown={(e) => { if (e.key === "Enter" && (cpInputs[s.id] || "").trim()) handleAddCp(s.id); }}
+                                placeholder="Add checkpoint..."
+                                maxLength={280}
+                                className="flex-1 px-3 py-1.5 bg-stone-900/80 border border-stone-700/50 rounded-lg text-xs text-stone-200 placeholder:text-stone-600 focus:outline-none focus:border-amber-500/50"
+                              />
+                              <button
+                                onClick={() => handleAddCp(s.id)}
+                                disabled={!(cpInputs[s.id] || "").trim()}
+                                className="px-3 py-1.5 rounded-lg bg-amber-500/20 text-amber-400 text-xs font-medium hover:bg-amber-500/30 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1"
+                              >
+                                <Icon path={ICONS.plus} size={12} /> Add
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </motion.div>
                 ))}
               </div>
