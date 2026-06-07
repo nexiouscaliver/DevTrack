@@ -140,6 +140,18 @@ function restoreVersion(versionId) {
 
   const raw = readFileSync(versionFile, "utf-8");
   const data = JSON.parse(raw);
+  // Validate data shape before writing
+  if (
+    !data ||
+    typeof data !== "object" ||
+    !Array.isArray(data.sessions) ||
+    !Array.isArray(data.commits) ||
+    !data.settings ||
+    typeof data.settings !== "object" ||
+    Array.isArray(data.settings)
+  ) {
+    throw new Error("Version data has invalid shape");
+  }
   writeDataFile(data);
 }
 
@@ -150,6 +162,20 @@ function deleteVersion(versionId) {
   const manifest = readManifest();
   manifest.versions = manifest.versions.filter((v) => v.id !== versionId);
   writeManifest(manifest);
+}
+
+// Validate version ID format: must be v_<digits>_<8 hex chars>
+function validateVersionId(req, res) {
+  const id = req.params.id;
+  if (!id || typeof id !== "string") {
+    res.status(400).json({ error: "Missing version ID" });
+    return null;
+  }
+  if (!/^v_\d+_[0-9a-f]{8}$/.test(id)) {
+    res.status(400).json({ error: "Invalid version ID format" });
+    return null;
+  }
+  return id;
 }
 
 // --- Request logging ---
@@ -451,7 +477,9 @@ app.get("/api/data/versions", (_req, res) => {
 // =====================================================
 app.get("/api/data/versions/:id", (req, res) => {
   try {
-    const versionFile = join(VERSIONS_DIR, `${req.params.id}.json`);
+    const id = validateVersionId(req, res);
+    if (!id) return;
+    const versionFile = join(VERSIONS_DIR, `${id}.json`);
     if (!existsSync(versionFile)) {
       return res.status(404).json({ error: "Version not found" });
     }
@@ -496,7 +524,8 @@ app.post("/api/data/versions", (req, res) => {
 // =====================================================
 app.post("/api/data/versions/:id/restore", (req, res) => {
   try {
-    const versionId = req.params.id;
+    const versionId = validateVersionId(req, res);
+    if (!versionId) return;
     writeQueue = writeQueue
       .then(() => {
         // Auto-backup current data before restoring
@@ -521,8 +550,15 @@ app.post("/api/data/versions/:id/restore", (req, res) => {
 // =====================================================
 app.delete("/api/data/versions/:id", (req, res) => {
   try {
-    deleteVersion(req.params.id);
-    res.json({ ok: true });
+    const versionId = validateVersionId(req, res);
+    if (!versionId) return;
+    writeQueue = writeQueue
+      .then(() => { deleteVersion(versionId); })
+      .then(() => { res.json({ ok: true }); })
+      .catch((err) => {
+        console.error("DevTrack: version delete error:", err.message);
+        if (!res.headersSent) res.status(500).json({ error: err.message });
+      });
   } catch (err) {
     console.error("DevTrack: version delete failed:", err.message);
     res.status(500).json({ error: "Failed to delete version" });
@@ -534,12 +570,19 @@ app.delete("/api/data/versions/:id", (req, res) => {
 // =====================================================
 app.delete("/api/data/versions", (_req, res) => {
   try {
-    const files = readdirSync(VERSIONS_DIR).filter((f) => f.endsWith(".json") && f !== "manifest.json");
-    for (const f of files) {
-      try { unlinkSync(join(VERSIONS_DIR, f)); } catch { /* best effort */ }
-    }
-    writeManifest({ versions: [] });
-    res.json({ ok: true, deletedCount: files.length });
+    writeQueue = writeQueue
+      .then(() => {
+        const files = readdirSync(VERSIONS_DIR).filter((f) => f.endsWith(".json") && f !== "manifest.json");
+        for (const f of files) {
+          try { unlinkSync(join(VERSIONS_DIR, f)); } catch { /* best effort */ }
+        }
+        writeManifest({ versions: [] });
+        res.json({ ok: true, deletedCount: files.length });
+      })
+      .catch((err) => {
+        console.error("DevTrack: bulk version delete error:", err.message);
+        if (!res.headersSent) res.status(500).json({ error: err.message });
+      });
   } catch (err) {
     console.error("DevTrack: failed to delete all versions:", err.message);
     res.status(500).json({ error: "Failed to delete versions" });

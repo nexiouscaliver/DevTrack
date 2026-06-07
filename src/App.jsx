@@ -775,8 +775,12 @@ export default function App() {
     if (running) {
       setActiveSession(running);
       if (running.status === "paused") {
-        const currentPause = (running.pauses || []).find((p) => p.end === null);
-        setElapsed(currentPause ? Date.now() - currentPause.start : 0);
+        // Match timer tick semantics: total pause time = completed pauses + current pause
+        const completedPauses = (running.pauses || [])
+          .filter((p) => p.end !== null)
+          .reduce((s, p) => s + (p.end - p.start), 0);
+        const currentPauseStart = (running.pauses || []).find((p) => p.end === null)?.start || Date.now();
+        setElapsed(completedPauses + (Date.now() - currentPauseStart));
       } else {
         const paused = (running.pauses || []).reduce((s, p) => s + ((p.end || 0) - p.start), 0);
         setElapsed(Date.now() - running.start - paused);
@@ -1211,6 +1215,7 @@ export default function App() {
         onOpenSync={() => { setSettingsOpen(false); setSyncOpen(true); }}
       />
       <SyncView
+        key={syncOpen ? "open" : "closed"}
         open={syncOpen}
         onClose={() => setSyncOpen(false)}
         localData={data}
@@ -3467,7 +3472,7 @@ function SyncView({ open, onClose, localData, applySyncResult, showToast }) {
         if (!srvData) {
           const localEmpty = !localData?.sessions?.length && !localData?.commits?.length;
           if (localEmpty) {
-            setPhase("error");
+            setPhase("no-data");
           } else {
             setPhase("no-server");
           }
@@ -3543,10 +3548,11 @@ function SyncView({ open, onClose, localData, applySyncResult, showToast }) {
         diffResult.ui.conflicts.length > 0;
       if (hasConflicts) {
         // Auto-resolve everything to "local" as default
-        const autoRes = {};
-        for (const c of diffResult.sessions.conflicts) autoRes[c.id] = "local";
-        for (const c of diffResult.commits.conflicts) autoRes[c.id] = "local";
-        setResolutions({ sessions: autoRes, commits: {}, settings: {}, ui: {} });
+        const sessionAutoRes = {};
+        const commitAutoRes = {};
+        for (const c of diffResult.sessions.conflicts) sessionAutoRes[c.id] = "local";
+        for (const c of diffResult.commits.conflicts) commitAutoRes[c.id] = "local";
+        setResolutions({ sessions: sessionAutoRes, commits: commitAutoRes, settings: {}, ui: {} });
         setPhase("conflicts");
         return;
       }
@@ -3601,7 +3607,22 @@ function SyncView({ open, onClose, localData, applySyncResult, showToast }) {
   // Execute push-only for no-server case
   const executePushOnly = async () => {
     setPhase("executing");
+    setStrategy("push");
     try {
+      // Attempt version backup (best effort — may not exist on server yet)
+      await fetch("/api/data/versions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ label: "pre-sync-push" }),
+      }).catch(() => {});
+      setPreview({
+        strategy: "push",
+        description: ["Local data pushed to server."],
+        resultSummary: {
+          sessionsCount: localData?.sessions?.length || 0,
+          commitsCount: localData?.commits?.length || 0,
+        },
+      });
       applySyncResult(localData);
       setPhase("done");
     } catch {
@@ -3613,7 +3634,21 @@ function SyncView({ open, onClose, localData, applySyncResult, showToast }) {
   // Execute pull-only for no-local case
   const executePullOnly = async () => {
     setPhase("executing");
+    setStrategy("pull");
     try {
+      await fetch("/api/data/versions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ label: "pre-sync-pull" }),
+      }).catch(() => {});
+      setPreview({
+        strategy: "pull",
+        description: ["Server data pulled to browser."],
+        resultSummary: {
+          sessionsCount: serverData?.sessions?.length || 0,
+          commitsCount: serverData?.commits?.length || 0,
+        },
+      });
       applySyncResult(serverData);
       setPhase("done");
     } catch {
@@ -3737,6 +3772,26 @@ function SyncView({ open, onClose, localData, applySyncResult, showToast }) {
           <div className="text-center py-12">
             <p className="text-rose-400 mb-4">Cannot reach the sync server.</p>
             <p className="text-stone-500 text-sm mb-6">Make sure the git server is running on port 9001.</p>
+            <button onClick={onClose} className="px-6 py-2 rounded-lg bg-stone-800 hover:bg-stone-700 text-sm transition-colors">
+              Close
+            </button>
+          </div>
+        </motion.div>
+      </div>
+    );
+  }
+
+  // ─── RENDER: No data on either side ───
+  if (phase === "no-data") {
+    return (
+      <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={onClose}>
+        <motion.div initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }}
+          onClick={(e) => e.stopPropagation()} className="bg-stone-900 border border-stone-800 rounded-2xl p-6 w-full max-w-2xl">
+          {renderHeader("Data Sync")}
+          <div className="text-center py-12">
+            <div className="text-stone-400 text-4xl mb-3">📭</div>
+            <p className="text-stone-300 mb-2">No data to sync.</p>
+            <p className="text-stone-500 text-sm mb-6">Neither your browser nor the server has any tracked data yet. Start tracking sessions or commits first.</p>
             <button onClick={onClose} className="px-6 py-2 rounded-lg bg-stone-800 hover:bg-stone-700 text-sm transition-colors">
               Close
             </button>
@@ -4288,6 +4343,24 @@ function SyncView({ open, onClose, localData, applySyncResult, showToast }) {
               Back
             </button>
           </div>
+        </motion.div>
+      </div>
+    );
+  }
+
+  // ─── RENDER: Dryrun fallback (preview not ready) ───
+  if (phase === "dryrun" && !preview) {
+    return (
+      <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={onClose}>
+        <motion.div initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }}
+          onClick={(e) => e.stopPropagation()}
+          className="bg-stone-900 border border-stone-800 rounded-2xl p-6 w-full max-w-2xl">
+          {renderHeader("Sync Preview")}
+          <p className="text-stone-400 text-sm mb-4">Something went wrong generating the preview.</p>
+          <button onClick={() => setPhase("summary")}
+            className="px-4 py-2 rounded-lg bg-stone-800 hover:bg-stone-700 text-sm transition-colors">
+            Back to Summary
+          </button>
         </motion.div>
       </div>
     );

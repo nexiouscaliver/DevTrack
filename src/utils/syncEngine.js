@@ -38,7 +38,8 @@ function diffFields(localObj, serverObj) {
 }
 
 // Compare two arrays of objects by a key function.
-// Returns { localOnly, serverOnly, conflicts, identical }
+// Returns { localOnly, serverOnly, conflicts, identicalItems }
+// identicalItems is an array (not a count) for direct use in merge.
 function diffArrays(localArr, serverArr, keyFn) {
   const localMap = new Map(localArr.map((item) => [keyFn(item), item]));
   const serverMap = new Map(serverArr.map((item) => [keyFn(item), item]));
@@ -46,9 +47,9 @@ function diffArrays(localArr, serverArr, keyFn) {
   const localOnly = [];
   const serverOnly = [];
   const conflicts = [];
-  let identical = 0;
+  const identicalItems = [];
 
-  // Find local-only and conflicts
+  // Find local-only, conflicts, and identical items
   for (const item of localArr) {
     const key = keyFn(item);
     if (!serverMap.has(key)) {
@@ -56,7 +57,7 @@ function diffArrays(localArr, serverArr, keyFn) {
     } else {
       const serverItem = serverMap.get(key);
       if (JSON.stringify(item) === JSON.stringify(serverItem)) {
-        identical++;
+        identicalItems.push(item);
       } else {
         const fields = diffFields(item, serverItem);
         conflicts.push({ id: key, local: item, server: serverItem, fields });
@@ -72,7 +73,7 @@ function diffArrays(localArr, serverArr, keyFn) {
     }
   }
 
-  return { localOnly, serverOnly, conflicts, identical };
+  return { localOnly, serverOnly, conflicts, identicalItems };
 }
 
 // Diff settings object — field-by-field with special handling for nested structures
@@ -172,11 +173,10 @@ export function computeDiff(localData, serverData) {
 
   const ui = diffUi(localData?.ui || {}, serverData?.ui || {});
 
+  // Counts for array items only (sessions + commits)
   const localOnlyCount =
     sessions.localOnly.length +
-    commits.localOnly.length +
-    settings.conflicts.length +
-    ui.conflicts.length;
+    commits.localOnly.length;
 
   const serverOnlyCount =
     sessions.serverOnly.length +
@@ -188,7 +188,7 @@ export function computeDiff(localData, serverData) {
     settings.conflicts.length +
     ui.conflicts.length;
 
-  const identicalCount = sessions.identical + commits.identical;
+  const identicalCount = sessions.identicalItems.length + commits.identicalItems.length;
 
   return {
     sessions,
@@ -200,6 +200,8 @@ export function computeDiff(localData, serverData) {
       serverOnlyCount,
       conflictCount,
       identicalCount,
+      settingsDiffs: settings.conflicts.length,
+      uiDiffs: ui.conflicts.length,
       localTotal: (localData?.sessions || []).length + (localData?.commits || []).length,
       serverTotal: (serverData?.sessions || []).length + (serverData?.commits || []).length,
     },
@@ -222,23 +224,14 @@ export function applyMerge(localData, serverData, diffResult, resolutions) {
   const settingsResolution = resolutions?.settings || {};
   const uiResolution = resolutions?.ui || {};
 
-  // Sessions: union of local-only + server-only + resolved conflicts + identical
+  // Sessions: union of local-only + server-only + resolved conflicts + identical items
   const mergedSessions = [
     ...diffResult.sessions.localOnly,
     ...diffResult.sessions.serverOnly,
     ...diffResult.sessions.conflicts.map((c) =>
       sessionResolutions[c.id] === "server" ? c.server : c.local
     ),
-    // Include identical sessions from either side (they're the same)
-    ...diffResult.sessions.identical
-      ? localData.sessions.filter((s) => {
-          const key = sessionKey(s);
-          const inLocalOnly = diffResult.sessions.localOnly.some((l) => sessionKey(l) === key);
-          const inServerOnly = diffResult.sessions.serverOnly.some((l) => sessionKey(l) === key);
-          const inConflict = diffResult.sessions.conflicts.some((c) => c.id === key);
-          return !inLocalOnly && !inServerOnly && !inConflict;
-        })
-      : [],
+    ...diffResult.sessions.identicalItems,
   ];
 
   // Commits: same union approach
@@ -248,17 +241,11 @@ export function applyMerge(localData, serverData, diffResult, resolutions) {
     ...diffResult.commits.conflicts.map((c) =>
       commitResolutions[c.id] === "server" ? c.server : c.local
     ),
-    ...localData.commits.filter((c) => {
-      const key = commitKey(c);
-      const inLocalOnly = diffResult.commits.localOnly.some((l) => commitKey(l) === key);
-      const inServerOnly = diffResult.commits.serverOnly.some((l) => commitKey(l) === key);
-      const inConflict = diffResult.commits.conflicts.some((c2) => c2.id === key);
-      return !inLocalOnly && !inServerOnly && !inConflict;
-    }),
+    ...diffResult.commits.identicalItems,
   ];
 
   // Settings: pick resolved values or keep local (as base) for non-conflicting fields
-  const mergedSettings = { ...localData.settings };
+  const mergedSettings = { ...(localData?.settings || {}) };
   for (const conflict of diffResult.settings.conflicts) {
     const pick = settingsResolution[conflict.key];
     if (pick === "server") {
@@ -268,7 +255,7 @@ export function applyMerge(localData, serverData, diffResult, resolutions) {
   }
 
   // UI: pick resolved values or keep local
-  const mergedUi = { ...localData.ui };
+  const mergedUi = { ...(localData?.ui || {}) };
   for (const conflict of diffResult.ui.conflicts) {
     const pick = uiResolution[conflict.key];
     if (pick === "server") {
@@ -300,6 +287,16 @@ export function previewSync(strategy, localData, serverData, diffResult, resolut
         `⚠ ${diffResult.commits.serverOnly.length} server-only commit(s) and ${diffResult.sessions.serverOnly.length} server-only session(s) will be lost.`
       );
     }
+    if (diffResult.summary.settingsDiffs > 0) {
+      description.push(
+        `⚠ ${diffResult.summary.settingsDiffs} settings field(s) will be overwritten with local values.`
+      );
+    }
+    if (diffResult.summary.uiDiffs > 0) {
+      description.push(
+        `⚠ ${diffResult.summary.uiDiffs} UI preference(s) will be overwritten with local values.`
+      );
+    }
     if (diffResult.summary.localOnlyCount > 0) {
       description.push(
         `✓ ${diffResult.sessions.localOnly.length} local session(s) and ${diffResult.commits.localOnly.length} local commit(s) will be written to disk.`
@@ -324,6 +321,16 @@ export function previewSync(strategy, localData, serverData, diffResult, resolut
     if (diffResult.summary.localOnlyCount > 0) {
       description.push(
         `⚠ ${diffResult.sessions.localOnly.length} local-only session(s) and ${diffResult.commits.localOnly.length} local-only commit(s) will be lost.`
+      );
+    }
+    if (diffResult.summary.settingsDiffs > 0) {
+      description.push(
+        `⚠ ${diffResult.summary.settingsDiffs} settings field(s) will be overwritten with server values.`
+      );
+    }
+    if (diffResult.summary.uiDiffs > 0) {
+      description.push(
+        `⚠ ${diffResult.summary.uiDiffs} UI preference(s) will be overwritten with server values.`
       );
     }
     if (diffResult.summary.serverOnlyCount > 0) {
@@ -384,8 +391,6 @@ export function previewSync(strategy, localData, serverData, diffResult, resolut
   if (uiConflicts > 0) {
     description.push(`${uiConflicts} UI preference(s) resolved.`);
   }
-
-  description.push(`A backup of current disk data will be saved before syncing.`);
 
   return { strategy, description, resultSummary, previewData: result };
 }
