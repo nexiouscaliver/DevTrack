@@ -1012,7 +1012,7 @@ export function generateExcelReport(data, period) {
   // Download — use XLSX.write() with cellStyles:true to preserve formatting
   const periodLabel = period.charAt(0).toUpperCase() + period.slice(1);
   const filename = `DevTrack_Report_${periodLabel}_${formatDate(Date.now()).replace(/\s/g, "-")}.xlsx`;
-  const wbOut = XLSX.writeXLSX(wb, { type: "array", cellStyles: true });
+  const wbOut = XLSX.write(wb, { type: "array", cellStyles: true, bookType: "xlsx" });
   const blob = new Blob([wbOut], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
