@@ -134,6 +134,9 @@ const ICONS = {
       <circle cx="12" cy="12" r="2" />
     </>
   ),
+  tag: (
+    <path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82zM7 7h.01" />
+  ),
   fire: (
     <path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z" />
   ),
@@ -1509,158 +1512,178 @@ function TimerView({
         <p className="text-stone-400">One session. Pause when you need a break. Stop when you&apos;re done.</p>
       </div>
 
-      <div className="bg-gradient-to-br from-stone-900 to-stone-900/50 border border-stone-800 rounded-2xl p-10 text-center">
-        {/* Status badge */}
-        {activeSession && (
-          <div className="mb-4">
-            <span className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-semibold uppercase tracking-wide ${
-              isPaused
-                ? "bg-sky-500/20 text-sky-300 border border-sky-500/30"
-                : "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
-            }`}>
-              <span className={`w-2 h-2 rounded-full ${isPaused ? "bg-sky-400" : "bg-emerald-400 animate-pulse"}`} />
-              {isPaused ? "On Break" : "Working"}
-            </span>
-          </div>
-        )}
-
-        {/* Timer display */}
-        <div className="relative inline-block mb-6">
-          <div className={`w-48 h-48 sm:w-56 sm:h-56 md:w-64 md:h-64 rounded-full flex items-center justify-center relative`}>
-            <svg className="absolute inset-0 w-full h-full -rotate-90" viewBox="0 0 256 256">
-              <circle cx="128" cy="128" r="110" fill="none" stroke="#292524" strokeWidth="6" />
-              {activeSession && (
-                <circle
-                  cx="128" cy="128" r="110" fill="none"
-                  stroke={isPaused ? "url(#timerBreakGrad)" : "url(#timerGrad)"}
-                  strokeWidth="6"
-                  strokeDasharray={`${Math.min(((displayWorkTime) / ((data.settings.dailyGoal || 8) * 3600000)) * 691, 691)} 691`}
-                  strokeLinecap="round"
-                />
-              )}
-              <defs>
-                <linearGradient id="timerGrad">
-                  <stop offset="0%" stopColor="#f59e0b" />
-                  <stop offset="100%" stopColor="#f97316" />
-                </linearGradient>
-                <linearGradient id="timerBreakGrad">
-                  <stop offset="0%" stopColor="#38bdf8" />
-                  <stop offset="100%" stopColor="#0ea5e9" />
-                </linearGradient>
-              </defs>
-            </svg>
-            <div className="text-center">
-              <div className="font-mono text-2xl sm:text-3xl font-bold">
-                {!activeSession ? "00:00:00" : formatDuration(displayWorkTime)}
+      <div className="bg-gradient-to-br from-stone-900 to-stone-900/50 border border-stone-800 rounded-2xl p-6 sm:p-8 text-center">
+            {/* Status badge */}
+            {activeSession && (
+              <div className="mb-5">
+                <span className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-semibold uppercase tracking-wide ${
+                  isPaused
+                    ? "bg-sky-500/15 text-sky-300 border border-sky-500/30"
+                    : "bg-emerald-500/15 text-emerald-300 border border-emerald-500/30"
+                }`}>
+                  <span className={`w-2 h-2 rounded-full ${isPaused ? "bg-sky-400" : "bg-emerald-400 animate-pulse"}`} />
+                  {isPaused ? "On Break" : "Working"}
+                </span>
               </div>
-              <div className="text-xs uppercase tracking-widest text-stone-400 mt-2">
-                {!activeSession ? "Ready" : isPaused ? "Work Time" : "Elapsed"}
+            )}
+
+            {/* Timer display */}
+            <div className="relative inline-block mb-6">
+              <div className={`w-48 h-48 sm:w-56 sm:h-56 md:w-64 md:h-64 rounded-full flex items-center justify-center relative`}>
+                <svg className="absolute inset-0 w-full h-full -rotate-90" viewBox="0 0 256 256">
+                  <circle cx="128" cy="128" r="110" fill="none" stroke="#292524" strokeWidth="6" />
+                  {activeSession && (
+                    <circle
+                      cx="128" cy="128" r="110" fill="none"
+                      stroke={isPaused ? "url(#timerBreakGrad)" : "url(#timerGrad)"}
+                      strokeWidth="6"
+                      strokeDasharray={`${Math.min(((displayWorkTime) / ((data.settings.dailyGoal || 8) * 3600000)) * 691, 691)} 691`}
+                      strokeLinecap="round"
+                    />
+                  )}
+                  <defs>
+                    <linearGradient id="timerGrad">
+                      <stop offset="0%" stopColor="#f59e0b" />
+                      <stop offset="100%" stopColor="#f97316" />
+                    </linearGradient>
+                    <linearGradient id="timerBreakGrad">
+                      <stop offset="0%" stopColor="#38bdf8" />
+                      <stop offset="100%" stopColor="#0ea5e9" />
+                    </linearGradient>
+                  </defs>
+                </svg>
+                <div className="text-center">
+                  <div className="font-mono text-2xl sm:text-3xl font-bold">
+                    {!activeSession ? "00:00:00" : formatDuration(displayWorkTime)}
+                  </div>
+                  <div className="text-xs uppercase tracking-widest text-stone-400 mt-2">
+                    {!activeSession ? "Ready" : isPaused ? "Work Time" : "Elapsed"}
+                  </div>
+                </div>
               </div>
             </div>
-          </div>
-        </div>
 
-        {/* Break timer — shown when paused */}
-        {isPaused && (
-          <motion.div
-            initial={{ opacity: 0, y: -10 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="mb-6 p-4 rounded-xl bg-sky-500/10 border border-sky-500/20 inline-block"
-          >
-            <div className="flex items-center gap-2 justify-center mb-1">
-              <Icon path={ICONS.coffee} size={14} className="text-sky-400" />
-              <span className="text-xs text-sky-300 font-medium uppercase">Break Time</span>
-            </div>
-            <div className="font-mono text-2xl font-bold text-sky-300">
-              {formatDuration(breakElapsed)}
-            </div>
-          </motion.div>
-        )}
-
-        {/* Pauses taken indicator */}
-        {activeSession && (activeSession.pauses || []).filter((p) => p.end !== null).length > 0 && !isPaused && (
-          <div className="mb-4 text-xs text-stone-400">
-            {(activeSession.pauses || []).filter((p) => p.end !== null).length} break{(activeSession.pauses || []).filter((p) => p.end !== null).length !== 1 ? "s" : ""} taken today
-            {" "}({formatDuration((activeSession.pauses || []).filter((p) => p.end !== null).reduce((s, p) => s + (p.end - p.start), 0))} total)
-          </div>
-        )}
-
-        {/* Controls */}
-        {!activeSession ? (
-          <div className="space-y-4 max-w-md mx-auto">
-            <input
-              value={tags}
-              onChange={(e) => setTags(e.target.value)}
-              placeholder="Tags (comma separated)"
-              className="w-full px-4 py-2.5 bg-stone-800 border border-stone-700 rounded-xl text-sm focus:outline-none focus:border-amber-500"
-            />
-            <textarea
-              value={notes}
-              onChange={(e) => setNotes(e.target.value)}
-              placeholder="What are you working on?"
-              rows={2}
-              className="w-full px-4 py-2.5 bg-stone-800 border border-stone-700 rounded-xl text-sm focus:outline-none focus:border-amber-500 resize-none"
-            />
-            <button
-              onClick={handleStart}
-              className="w-full py-3 rounded-xl bg-gradient-to-r from-amber-500 to-orange-600 hover:from-amber-600 hover:to-orange-700 font-semibold flex items-center justify-center gap-2 shadow-lg shadow-amber-500/30 active:scale-[0.98] transition-transform"
-            >
-              <Icon path={ICONS.play} size={18} /> Start Work Session
-            </button>
-          </div>
-        ) : (
-          <div className="space-y-4 max-w-md mx-auto">
-            <input
-              value={tags}
-              onChange={(e) => setTags(e.target.value)}
-              placeholder="Tags"
-              className="w-full px-4 py-2.5 bg-stone-800 border border-stone-700 rounded-xl text-sm focus:outline-none focus:border-amber-500"
-            />
-            <textarea
-              value={notes}
-              onChange={(e) => setNotes(e.target.value)}
-              placeholder="Notes..."
-              rows={2}
-              className="w-full px-4 py-2.5 bg-stone-800 border border-stone-700 rounded-xl text-sm focus:outline-none focus:border-amber-500 resize-none"
-            />
-            <div className="flex gap-2">
-              {isPaused ? (
-                <button
-                  onClick={resumeSession}
-                  className="flex-1 py-3 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-600 hover:to-teal-700 font-semibold flex items-center justify-center gap-2 shadow-lg shadow-emerald-500/30 active:scale-[0.98] transition-transform"
-                >
-                  <Icon path={ICONS.play} size={18} /> Resume Work
-                </button>
-              ) : (
-                <button
-                  onClick={pauseSession}
-                  className="flex-1 py-3 rounded-xl bg-gradient-to-r from-sky-500 to-blue-600 hover:from-sky-600 hover:to-blue-700 font-semibold flex items-center justify-center gap-2 shadow-lg shadow-sky-500/30 active:scale-[0.98] transition-transform"
-                >
-                  <Icon path={ICONS.pause} size={18} /> Take a Break
-                </button>
-              )}
-              <button
-                onClick={stopSession}
-                className="px-5 py-3 rounded-xl bg-stone-800 hover:bg-stone-700 font-semibold flex items-center justify-center gap-2 border border-stone-700"
+            {/* Break timer — shown when paused */}
+            {isPaused && (
+              <motion.div
+                initial={{ opacity: 0, y: -10 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="mb-6 p-3 px-5 rounded-xl bg-sky-500/10 border border-sky-500/20 inline-flex items-center gap-3"
               >
-                <Icon path={ICONS.stop} size={18} /> Finish
-              </button>
-              <button
-                onClick={saveSessionNotes}
-                className="px-5 py-3 rounded-xl bg-stone-800 hover:bg-stone-700 font-semibold flex items-center justify-center gap-2"
-              >
-                <Icon path={ICONS.check} size={18} />
-              </button>
-            </div>
-            <p className="text-xs text-stone-400">
-              Started at {formatTime(activeSession.start)}
-              {(activeSession.pauses || []).filter((p) => p.end !== null).length > 0 && (
-                <span> · {(activeSession.pauses || []).filter((p) => p.end !== null).length} break{(activeSession.pauses || []).filter((p) => p.end !== null).length !== 1 ? "s" : ""} taken</span>
-              )}
-            </p>
+                <Icon path={ICONS.coffee} size={16} className="text-sky-400 shrink-0" />
+                <div className="text-left">
+                  <div className="text-[10px] text-sky-400/70 font-medium uppercase tracking-wider">Break</div>
+                  <div className="font-mono text-lg font-bold text-sky-300 leading-tight">
+                    {formatDuration(breakElapsed)}
+                  </div>
+                </div>
+              </motion.div>
+            )}
+
+            {/* Pauses taken indicator */}
+            {activeSession && (activeSession.pauses || []).filter((p) => p.end !== null).length > 0 && !isPaused && (
+              <div className="mb-5 inline-flex items-center gap-2 text-xs text-stone-500">
+                <Icon path={ICONS.coffee} size={12} className="text-stone-500" />
+                <span>
+                  {(activeSession.pauses || []).filter((p) => p.end !== null).length} break{(activeSession.pauses || []).filter((p) => p.end !== null).length !== 1 ? "s" : ""} taken
+                  {" "}(<span className="text-stone-400">{formatDuration((activeSession.pauses || []).filter((p) => p.end !== null).reduce((s, p) => s + (p.end - p.start), 0))}</span>)
+                </span>
+              </div>
+            )}
+
+            {/* Controls */}
+            {!activeSession ? (
+              <div className="max-w-sm mx-auto space-y-3">
+                <div className="bg-stone-800/60 border border-stone-700/60 rounded-xl p-3 space-y-2.5">
+                  <div className="relative">
+                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-stone-500">
+                      <Icon path={ICONS.tag} size={14} />
+                    </span>
+                    <input
+                      value={tags}
+                      onChange={(e) => setTags(e.target.value)}
+                      placeholder="Tags (comma separated)"
+                      className="w-full pl-9 pr-3 py-2 bg-stone-900/80 border border-stone-700/50 rounded-lg text-sm focus:outline-none focus:border-amber-500/60 focus:ring-1 focus:ring-amber-500/20 placeholder:text-stone-600"
+                    />
+                  </div>
+                  <textarea
+                    value={notes}
+                    onChange={(e) => setNotes(e.target.value)}
+                    placeholder="What are you working on?"
+                    rows={2}
+                    className="w-full px-3 py-2 bg-stone-900/80 border border-stone-700/50 rounded-lg text-sm focus:outline-none focus:border-amber-500/60 focus:ring-1 focus:ring-amber-500/20 resize-none placeholder:text-stone-600"
+                  />
+                </div>
+                <button
+                  onClick={handleStart}
+                  className="w-full py-2.5 rounded-xl bg-gradient-to-r from-amber-500 to-orange-600 hover:from-amber-600 hover:to-orange-700 font-semibold text-sm flex items-center justify-center gap-2 shadow-lg shadow-amber-500/20 active:scale-[0.98] transition-all"
+                >
+                  <Icon path={ICONS.play} size={16} /> Start Work Session
+                </button>
+              </div>
+            ) : (
+              <div className="max-w-sm mx-auto space-y-3">
+                <div className="bg-stone-800/60 border border-stone-700/60 rounded-xl p-3 space-y-2.5">
+                  <div className="relative">
+                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-stone-500">
+                      <Icon path={ICONS.tag} size={14} />
+                    </span>
+                    <input
+                      value={tags}
+                      onChange={(e) => setTags(e.target.value)}
+                      placeholder="Tags"
+                      className="w-full pl-9 pr-3 py-2 bg-stone-900/80 border border-stone-700/50 rounded-lg text-sm focus:outline-none focus:border-amber-500/60 focus:ring-1 focus:ring-amber-500/20 placeholder:text-stone-600"
+                    />
+                  </div>
+                  <textarea
+                    value={notes}
+                    onChange={(e) => setNotes(e.target.value)}
+                    placeholder="Notes..."
+                    rows={2}
+                    className="w-full px-3 py-2 bg-stone-900/80 border border-stone-700/50 rounded-lg text-sm focus:outline-none focus:border-amber-500/60 focus:ring-1 focus:ring-amber-500/20 resize-none placeholder:text-stone-600"
+                  />
+                </div>
+                <div className="flex gap-2">
+                  {isPaused ? (
+                    <button
+                      onClick={resumeSession}
+                      className="flex-1 py-2.5 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-600 hover:to-teal-700 font-semibold text-sm flex items-center justify-center gap-2 shadow-lg shadow-emerald-500/20 active:scale-[0.98] transition-all"
+                    >
+                      <Icon path={ICONS.play} size={16} /> Resume
+                    </button>
+                  ) : (
+                    <button
+                      onClick={pauseSession}
+                      className="flex-1 py-2.5 rounded-xl bg-gradient-to-r from-sky-500 to-blue-600 hover:from-sky-600 hover:to-blue-700 font-semibold text-sm flex items-center justify-center gap-2 shadow-lg shadow-sky-500/20 active:scale-[0.98] transition-all"
+                    >
+                      <Icon path={ICONS.pause} size={16} /> Break
+                    </button>
+                  )}
+                  <button
+                    onClick={saveSessionNotes}
+                    className="px-4 py-2.5 rounded-xl bg-stone-800 hover:bg-stone-700 text-sm font-medium flex items-center justify-center gap-1.5 border border-stone-700/50 active:scale-[0.98] transition-all text-stone-300 hover:text-stone-100"
+                  >
+                    <Icon path={ICONS.check} size={14} /> Save
+                  </button>
+                  <button
+                    onClick={stopSession}
+                    className="px-4 py-2.5 rounded-xl bg-stone-800 hover:bg-rose-900/40 text-sm font-medium flex items-center justify-center gap-1.5 border border-stone-700/50 hover:border-rose-500/30 active:scale-[0.98] transition-all text-stone-300 hover:text-rose-300"
+                  >
+                    <Icon path={ICONS.stop} size={14} /> Finish
+                  </button>
+                </div>
+                <div className="flex items-center justify-center gap-2 text-xs text-stone-500 pt-1">
+                  <span>Started {formatTime(activeSession.start)}</span>
+                  {(activeSession.pauses || []).filter((p) => p.end !== null).length > 0 && (
+                    <>
+                      <span className="text-stone-700">·</span>
+                      <span>{(activeSession.pauses || []).filter((p) => p.end !== null).length} break{(activeSession.pauses || []).filter((p) => p.end !== null).length !== 1 ? "s" : ""}</span>
+                    </>
+                  )}
+                </div>
+              </div>
+            )}
           </div>
-        )}
-      </div>
 
       {/* Today's sessions */}
       <div className="bg-stone-900/50 border border-stone-800 rounded-2xl p-6">
