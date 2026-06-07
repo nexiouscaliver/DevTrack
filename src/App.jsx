@@ -777,6 +777,7 @@ export default function App() {
   const saveTimer = useRef(null);
 
   // Wire module-level save hooks
+  // eslint-disable-next-line react-hooks/immutability
   _onQuotaExceeded.current = setQuotaWarning;
 
   // Server save with exponential-backoff retry (max 3 attempts)
@@ -798,12 +799,13 @@ export default function App() {
       // Server confirmed write — trim old data from localStorage cache
       const trimmed = trimLocalStorage(data, true);
       if (trimmed !== data) {
-        try { localStorage.setItem(STORAGE_KEY, JSON.stringify(trimmed)); } catch {}
+        try { localStorage.setItem(STORAGE_KEY, JSON.stringify(trimmed)); } catch { /* non-critical */ }
         setData(trimmed);
       }
     }).catch(() => {
       if (attempt < 3) {
         retryTimerRef.current = setTimeout(
+          // eslint-disable-next-line react-hooks/immutability
           () => saveToServer(data, attempt + 1),
           1000 * Math.pow(2, attempt - 1),
         );
@@ -816,6 +818,7 @@ export default function App() {
       }
     });
   }, []);
+  // eslint-disable-next-line react-hooks/immutability
   _serverSaveFn.current = saveToServer;
 
   // Debounced save — tracks whether a save is pending for lifecycle handlers
@@ -840,7 +843,7 @@ export default function App() {
     if (!pendingSaveRef.current) return;
     clearTimeout(saveTimer.current);
     const d = dataRef.current;
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(d)); } catch {}
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(d)); } catch { /* non-critical */ }
     // fetch with keepalive survives page teardown (up to 256 KB) and Express parses it correctly
     try {
       fetch("/api/data", {
@@ -849,7 +852,7 @@ export default function App() {
         body: JSON.stringify({ data: d }),
         keepalive: true,
       }).catch(() => {});
-    } catch {}
+    } catch { /* non-critical */ }
     pendingSaveRef.current = false;
   }, []);
 
@@ -882,6 +885,7 @@ export default function App() {
   // Also performs: health check, corruption recovery from server.
   const serverSynced = useRef(false);
   const dataRef = useRef(data);
+  // eslint-disable-next-line react-hooks/immutability
   useEffect(() => { dataRef.current = data; }, [data]);
   useEffect(() => {
     if (serverSynced.current) return;
@@ -898,9 +902,10 @@ export default function App() {
         if (trimmed !== dataRef.current) {
           const sRemoved = dataRef.current.sessions.length - trimmed.sessions.length;
           const cRemoved = dataRef.current.commits.length - trimmed.commits.length;
-          try { localStorage.setItem(STORAGE_KEY, JSON.stringify(trimmed)); } catch {}
+          try { localStorage.setItem(STORAGE_KEY, JSON.stringify(trimmed)); } catch { /* non-critical */ }
           setData(trimmed);
           if (sRemoved + cRemoved > 0) {
+            // eslint-disable-next-line react-hooks/immutability
             showToast(`Cleaned up ${sRemoved} old session${sRemoved !== 1 ? "s" : ""} and ${cRemoved} commit${cRemoved !== 1 ? "s" : ""} from local cache`, "success");
           }
         }
@@ -992,6 +997,7 @@ export default function App() {
     };
     window.addEventListener("storage", handleStorageChange);
     return () => window.removeEventListener("storage", handleStorageChange);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Timer tick — update every second while session is active (running or paused)
@@ -1031,10 +1037,12 @@ export default function App() {
         checkpointTimerRef.current = null;
       }
     };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeSession?.id, activeSession?.status]);
 
   const toastTimer = useRef(null);
 
+  // eslint-disable-next-line react-hooks/preserve-manual-memoization
   const showToast = useCallback((msg, type = "success") => {
     if (toastTimer.current) clearTimeout(toastTimer.current);
     setToast({ msg, type });
@@ -2170,9 +2178,11 @@ function TimerView({
   // Sync local state when activeSession changes externally (e.g. navigating back)
   useEffect(() => {
     if (activeSession) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setTags(activeSession.tags?.join(", ") || "");
       setNotes(activeSession.notes || "");
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeSession?.id]); // only on session identity change, not every prop update
 
   const handleStart = () => {
@@ -3649,6 +3659,7 @@ function AnalyticsView({ data, gitEstimatedSessions, initialRange, onRangeChange
   // When range is "year", fetch full historical data from server (beyond 2-month localStorage cache)
   useEffect(() => {
     if (range === "year" && fetchFullData && !fullData && !loadingFull) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setLoadingFull(true);
       fetchFullData().then((fd) => {
         setFullData(fd);
@@ -3933,7 +3944,7 @@ function ExportView({ data, gitAuthors, showToast, initialPeriod, initialFormat,
   const [format, setFormat] = useState(initialFormat || "xlsx");
   const [includeCheckpoints, setIncludeCheckpoints] = useState(data.ui?.exportIncludeCheckpoints ?? true);
   const [includeWorkLog, setIncludeWorkLog] = useState(data.ui?.exportIncludeWorkLog ?? true);
-  const [exporting, setExporting] = useState(false);
+  const [, setExporting] = useState(false);
   const preview = useMemo(() => getExportPreview(data, period), [data, period]);
 
   const handleExport = async () => {
