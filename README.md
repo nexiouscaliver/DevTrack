@@ -157,6 +157,43 @@ All claims are verifiable in the open-source code. The server binds to `127.0.0.
 
 ---
 
+## Disaster Recovery
+
+Your tracked time survives real-world accidents. Here is exactly what happens when things go wrong.
+
+### What happens when…
+
+| Scenario | What happens | How |
+|----------|-------------|-----|
+| **Browser tab closed accidentally** | Zero data loss | `beforeunload` fires a synchronous `localStorage.setItem` + `keepalive: true` fetch to the server |
+| **Browser crashes** | ≤ 300ms of data loss | Every state change triggers a debounced save (300ms) to both localStorage and server |
+| **Power cut / PC restart** | ≤ 300ms of data loss | localStorage persists across reboots. Server cleans up stale `.tmp` files on startup. Active session state is stored in localStorage and restored on next load |
+| **Active timer on reload** | Timer resumes exactly where it left off | Running/paused sessions are persisted with full state (start time, pauses, tags, notes). On reload, the timer picks up without missing a beat |
+| **localStorage corrupted** | Auto-recovered from server | Server disk backup loads automatically. A toast notifies you. localStorage is repaired in place |
+| **Server file corrupted** | Auto-renamed, client data used | The `.json` file is renamed to `.corrupt`. Client data becomes the source of truth and re-saves to a fresh file |
+| **Both corrupted** | Restored from version snapshots | Up to 20 point-in-time snapshots stored on disk. One-click restore from the Sync view |
+| **Write interrupted mid-save** | No corruption — atomic writes | Server writes to a `.tmp` file first, then renames. A write mutex prevents concurrent writes from interleaving. If the process dies, the `.tmp` is cleaned up on next start |
+| **Multiple tabs open** | Conflict detection + warning | `storage` events detect when another tab writes data. If you have unsaved changes, a warning toast appears. Otherwise, the other tab's data is adopted silently |
+| **Server not running** | Everything still works | The app reads/writes localStorage as primary. When the server comes back, the Sync view reconciles both copies |
+
+### The defense in depth
+
+```
+Every state change
+    ↓ (300ms debounced)
+localStorage.setItem()         ← Layer 1: instant, always available
+    ↓
+POST /api/data (keepalive)     ← Layer 2: disk backup via companion server
+    ↓                              (atomic tmp→rename, write mutex)
+Server data file corrupted?
+    ↓
+Version snapshots (up to 20)   ← Layer 3: point-in-time restore
+```
+
+None of this requires configuration. It all works out of the box.
+
+---
+
 ## Project Structure
 
 ```
