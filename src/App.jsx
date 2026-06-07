@@ -1526,31 +1526,31 @@ function TimerView({
 
         {/* Timer display */}
         <div className="relative inline-block mb-6">
-          <div className={`w-48 h-48 sm:w-56 sm:h-56 md:w-64 md:h-64 rounded-full border-4 ${isPaused ? "border-sky-800/50" : "border-stone-800"} flex items-center justify-center relative`}>
-            {activeSession && (
-              <svg className="absolute inset-0 w-full h-full -rotate-90" viewBox="0 0 256 256">
-                <circle cx="128" cy="128" r="124" fill="none" stroke="#292524" strokeWidth="4" />
+          <div className={`w-48 h-48 sm:w-56 sm:h-56 md:w-64 md:h-64 rounded-full flex items-center justify-center relative`}>
+            <svg className="absolute inset-0 w-full h-full -rotate-90" viewBox="0 0 256 256">
+              <circle cx="128" cy="128" r="110" fill="none" stroke="#292524" strokeWidth="6" />
+              {activeSession && (
                 <circle
-                  cx="128" cy="128" r="124" fill="none"
+                  cx="128" cy="128" r="110" fill="none"
                   stroke={isPaused ? "url(#timerBreakGrad)" : "url(#timerGrad)"}
-                  strokeWidth="4"
-                  strokeDasharray={`${Math.min(((displayWorkTime) / ((data.settings.dailyGoal || 8) * 3600000)) * 779, 779)} 779`}
+                  strokeWidth="6"
+                  strokeDasharray={`${Math.min(((displayWorkTime) / ((data.settings.dailyGoal || 8) * 3600000)) * 691, 691)} 691`}
                   strokeLinecap="round"
                 />
-                <defs>
-                  <linearGradient id="timerGrad">
-                    <stop offset="0%" stopColor="#f59e0b" />
-                    <stop offset="100%" stopColor="#f97316" />
-                  </linearGradient>
-                  <linearGradient id="timerBreakGrad">
-                    <stop offset="0%" stopColor="#38bdf8" />
-                    <stop offset="100%" stopColor="#0ea5e9" />
-                  </linearGradient>
-                </defs>
-              </svg>
-            )}
-            <div>
-              <div className="font-mono text-4xl sm:text-5xl font-bold">
+              )}
+              <defs>
+                <linearGradient id="timerGrad">
+                  <stop offset="0%" stopColor="#f59e0b" />
+                  <stop offset="100%" stopColor="#f97316" />
+                </linearGradient>
+                <linearGradient id="timerBreakGrad">
+                  <stop offset="0%" stopColor="#38bdf8" />
+                  <stop offset="100%" stopColor="#0ea5e9" />
+                </linearGradient>
+              </defs>
+            </svg>
+            <div className="text-center">
+              <div className="font-mono text-2xl sm:text-3xl font-bold">
                 {!activeSession ? "00:00:00" : formatDuration(displayWorkTime)}
               </div>
               <div className="text-xs uppercase tracking-widest text-stone-400 mt-2">
