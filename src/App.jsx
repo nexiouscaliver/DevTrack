@@ -391,7 +391,8 @@ function validateDataShape(parsed) {
     Array.isArray(parsed.sessions) &&
     Array.isArray(parsed.commits) &&
     parsed.settings &&
-    typeof parsed.settings === "object"
+    typeof parsed.settings === "object" &&
+    !Array.isArray(parsed.settings)
   );
 }
 
@@ -405,6 +406,9 @@ function migrate(parsed) {
   }
   if (!parsed.settings.trackedRepos) {
     parsed.settings.trackedRepos = [];
+  }
+  if (!parsed.settings.gitAuthors) {
+    parsed.settings.gitAuthors = { identities: [], autoDetected: null };
   }
   if ("idleMinutes" in parsed.settings) {
     delete parsed.settings.idleMinutes;
@@ -535,7 +539,13 @@ export default function App() {
       const running = serverData.sessions.find((s) => s.status === "running" || s.status === "paused") || null;
       if (running) {
         setActiveSession(running);
-        setElapsed(Date.now() - running.start);
+        if (running.status === "paused") {
+          const currentPause = (running.pauses || []).find((p) => p.end === null);
+          setElapsed(currentPause ? Date.now() - currentPause.start : 0);
+        } else {
+          const paused = (running.pauses || []).reduce((s, p) => s + ((p.end || 0) - p.start), 0);
+          setElapsed(Date.now() - running.start - paused);
+        }
       }
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps

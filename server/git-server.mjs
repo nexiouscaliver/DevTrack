@@ -32,9 +32,12 @@ const run = promisify(exec);
 const app = express();
 const PORT = 9001;
 
-app.use(express.json({ limit: "2mb" }));
+app.use(express.json({ limit: "5mb" }));
 
 // --- Data persistence helpers ---
+// Serialize writes to prevent concurrent POST interleaving
+let writeQueue = Promise.resolve();
+
 function readDataFile() {
   try {
     if (!existsSync(DATA_FILE)) return null;
@@ -42,7 +45,8 @@ function readDataFile() {
     return JSON.parse(raw);
   } catch (err) {
     if (existsSync(DATA_FILE)) {
-      console.warn("DevTrack: data file is corrupt or unreadable, ignoring:", err.message);
+      console.warn("DevTrack: data file is corrupt or unreadable, renaming to .corrupt:", err.message);
+      try { renameSync(DATA_FILE, DATA_FILE + ".corrupt"); } catch { /* best effort */ }
     }
     return null;
   }
@@ -306,14 +310,15 @@ app.post("/api/data", (req, res) => {
       !Array.isArray(data.sessions) ||
       !Array.isArray(data.commits) ||
       !data.settings ||
-      typeof data.settings !== "object"
+      typeof data.settings !== "object" ||
+      Array.isArray(data.settings)
     ) {
       return res.status(400).json({ error: "Invalid data shape" });
     }
     if (data.sessions.length > 10000 || data.commits.length > 10000) {
       return res.status(400).json({ error: "Data arrays exceed maximum length" });
     }
-    writeDataFile(data);
+    writeQueue = writeQueue.then(() => writeDataFile(data));
     res.json({ ok: true });
   } catch (err) {
     console.error("DevTrack: failed to write data file:", err.message);
@@ -326,9 +331,8 @@ app.post("/api/data", (req, res) => {
 // =====================================================
 app.delete("/api/data", (_req, res) => {
   try {
-    if (existsSync(DATA_FILE)) {
-      unlinkSync(DATA_FILE);
-    }
+    if (existsSync(DATA_FILE)) unlinkSync(DATA_FILE);
+    if (existsSync(TMP_FILE)) unlinkSync(TMP_FILE);
     res.json({ ok: true });
   } catch (err) {
     console.error("DevTrack: failed to delete data file:", err.message);
