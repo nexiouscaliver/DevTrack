@@ -619,6 +619,84 @@ const save = (data) => {
   }
 };
 
+// --- Active session protection during server sync ---
+// When the server sync runs on mount, it can overwrite the client's running session
+// with stale server data (e.g., a previous session that never got its "completed" save
+// through because the server was restarting). This function preserves the client's
+// active session when there's a conflict.
+// Assumes at most one running/paused session per side (enforced by the timer UI).
+function protectActiveSession(localData, serverData) {
+  if (!serverData) return localData;
+  const localActive = (localData?.sessions || []).find(
+    (s) => s.status === "running" || s.status === "paused",
+  );
+  // No local active session — server data is fine as-is
+  if (!localActive) return serverData;
+
+  const serverSessions = serverData.sessions || [];
+  const serverActive = serverSessions.find(
+    (s) => s.status === "running" || s.status === "paused",
+  );
+  // Server has no running session — inject the client's active session
+  if (!serverActive) {
+    const hasLocal = serverSessions.some((s) => s.id === localActive.id);
+    return {
+      ...serverData,
+      sessions: hasLocal
+        ? serverSessions.map((s) => (s.id === localActive.id ? localActive : s))
+        : [...serverSessions, localActive],
+    };
+  }
+
+  // Same session on both sides — keep client version (it's never stale)
+  if (serverActive.id === localActive.id) {
+    // Full comparison: only shortcut if truly identical, otherwise client wins
+    if (JSON.stringify(serverActive) === JSON.stringify(localActive)) return serverData;
+    return {
+      ...serverData,
+      sessions: serverSessions.map((s) =>
+        s.id === localActive.id ? localActive : s,
+      ),
+    };
+  }
+
+  // Different sessions — server has a stale running session from a failed save.
+  // Mark the server's stale session as completed, then ensure the client's session is present.
+  const now = Date.now();
+  const patched = serverSessions.map((s) => {
+    if (s.id !== serverActive.id) return s;
+    return {
+      ...s,
+      status: "completed",
+      end: s.end || now,
+      duration: s.duration || (s.end ? s.end - s.start : now - s.start),
+    };
+  });
+  const hasLocal = patched.some((s) => s.id === localActive.id);
+  return {
+    ...serverData,
+    sessions: hasLocal
+      ? patched.map((s) => (s.id === localActive.id ? localActive : s))
+      : [...patched, localActive],
+  };
+}
+
+// Compute elapsed time for a session in milliseconds.
+// For running sessions: wall-clock time minus all completed pauses.
+// For paused sessions: total break time (completed pauses + current pause) — matches timer tick semantics.
+function computeElapsed(session) {
+  if (!session || typeof session.start !== "number") return 0;
+  if (session.status === "paused") {
+    const completedPauses = (session.pauses || [])
+      .filter((p) => p.end !== null)
+      .reduce((s, p) => s + (p.end - p.start), 0);
+    const currentPauseStart = (session.pauses || []).find((p) => p.end === null)?.start || Date.now();
+    return Math.max(0, completedPauses + (Date.now() - currentPauseStart));
+  }
+  const paused = (session.pauses || []).reduce((s, p) => s + ((p.end || 0) - p.start), 0);
+  return Math.max(0, Date.now() - session.start - paused);
+}
+
 // --- Smart localStorage cache eviction ---
 // localStorage is a buffer, not the primary store. The server disk is source of truth.
 // This function trims completed sessions and commits older than 2 months from the data
@@ -684,12 +762,7 @@ export default function App() {
   });
   const [elapsed, setElapsed] = useState(() => {
     const active = (initialData?.sessions || []).find((s) => s.status === "running" || s.status === "paused");
-    if (!active) return 0;
-    if (active.status === "paused") {
-      const currentPause = (active.pauses || []).find((p) => p.end === null);
-      return currentPause ? Date.now() - currentPause.start : 0;
-    }
-    return Date.now() - active.start;
+    return computeElapsed(active);
   });
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [syncOpen, setSyncOpen] = useState(false);
@@ -849,19 +922,18 @@ export default function App() {
           ? { ...sanitized, sessions: linkCommitsToSessions(sanitized.sessions, sanitized.commits) }
           : null;
         if (restored) {
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(restored));
-          setData(restored);
-          setView(restored.ui?.view || "dashboard");
-          const running = restored.sessions.find((s) => s.status === "running" || s.status === "paused") || null;
+          // Defensive: protect any in-memory active session from stale server data
+          const safe = protectActiveSession(dataRef.current, restored);
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(safe));
+          setData(safe);
+          setView(safe.ui?.view || "dashboard");
+          const running = safe.sessions.find((s) => s.status === "running" || s.status === "paused") || null;
           if (running) {
             setActiveSession(running);
-            if (running.status === "paused") {
-              const currentPause = (running.pauses || []).find((p) => p.end === null);
-              setElapsed(currentPause ? Date.now() - currentPause.start : 0);
-            } else {
-              const paused = (running.pauses || []).reduce((s, p) => s + ((p.end || 0) - p.start), 0);
-              setElapsed(Date.now() - running.start - paused);
-            }
+            setElapsed(computeElapsed(running));
+          } else {
+            setActiveSession(null);
+            setElapsed(0);
           }
           showToast("Local data was corrupted — recovered from server backup", "warning");
           return;
@@ -876,19 +948,18 @@ export default function App() {
         ...serverData,
         sessions: linkCommitsToSessions(serverData.sessions, serverData.commits),
       };
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(linked));
-      setData(linked);
-      setView(linked.ui?.view || "dashboard");
-      const running = linked.sessions.find((s) => s.status === "running" || s.status === "paused") || null;
+      // Protect the client's active session from being overwritten by stale server data
+      const merged = protectActiveSession(dataRef.current, linked);
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(merged));
+      setData(merged);
+      setView(merged.ui?.view || "dashboard");
+      const running = merged.sessions.find((s) => s.status === "running" || s.status === "paused") || null;
       if (running) {
         setActiveSession(running);
-        if (running.status === "paused") {
-          const currentPause = (running.pauses || []).find((p) => p.end === null);
-          setElapsed(currentPause ? Date.now() - currentPause.start : 0);
-        } else {
-          const paused = (running.pauses || []).reduce((s, p) => s + ((p.end || 0) - p.start), 0);
-          setElapsed(Date.now() - running.start - paused);
-        }
+        setElapsed(computeElapsed(running));
+      } else {
+        setActiveSession(null);
+        setElapsed(0);
       }
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -926,19 +997,7 @@ export default function App() {
   // Timer tick — update every second while session is active (running or paused)
   useEffect(() => {
     if (!activeSession || activeSession.status === "completed") return;
-    const tick = () => {
-      if (activeSession.status === "running") {
-        const paused = activeSession.pauses.reduce((s, p) => s + ((p.end || 0) - p.start), 0);
-        setElapsed(Date.now() - activeSession.start - paused);
-      } else if (activeSession.status === "paused") {
-        // Keep ticking so break elapsed updates
-        const completedPauses = activeSession.pauses
-          .filter((p) => p.end !== null)
-          .reduce((s, p) => s + (p.end - p.start), 0);
-        const currentPauseStart = activeSession.pauses[activeSession.pauses.length - 1]?.start || Date.now();
-        setElapsed(completedPauses + (Date.now() - currentPauseStart));
-      }
-    };
+    const tick = () => setElapsed(computeElapsed(activeSession));
     tick();
     const id = setInterval(tick, 1000);
     return () => clearInterval(id);
@@ -1277,17 +1336,7 @@ export default function App() {
     );
     if (running) {
       setActiveSession(running);
-      if (running.status === "paused") {
-        // Match timer tick semantics: total pause time = completed pauses + current pause
-        const completedPauses = (running.pauses || [])
-          .filter((p) => p.end !== null)
-          .reduce((s, p) => s + (p.end - p.start), 0);
-        const currentPauseStart = (running.pauses || []).find((p) => p.end === null)?.start || Date.now();
-        setElapsed(completedPauses + (Date.now() - currentPauseStart));
-      } else {
-        const paused = (running.pauses || []).reduce((s, p) => s + ((p.end || 0) - p.start), 0);
-        setElapsed(Date.now() - running.start - paused);
-      }
+      setElapsed(computeElapsed(running));
     } else {
       setActiveSession(null);
       setElapsed(0);
