@@ -3,6 +3,7 @@ import { exec } from "child_process";
 import { promisify } from "util";
 import { basename, isAbsolute, dirname, join } from "path";
 import { fileURLToPath } from "url";
+import { createHash } from "crypto";
 import {
   existsSync,
   mkdirSync,
@@ -10,16 +11,24 @@ import {
   writeFileSync,
   renameSync,
   unlinkSync,
+  readdirSync,
 } from "fs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const DATA_DIR = join(__dirname, "data");
 const DATA_FILE = join(DATA_DIR, "devtrack.json");
+const VERSIONS_DIR = join(DATA_DIR, "versions");
+const MANIFEST_FILE = join(VERSIONS_DIR, "manifest.json");
+const MAX_VERSIONS = 20;
 
 // Ensure data directory exists at startup
 if (!existsSync(DATA_DIR)) {
   mkdirSync(DATA_DIR, { recursive: true });
+}
+// Ensure versions directory exists at startup
+if (!existsSync(VERSIONS_DIR)) {
+  mkdirSync(VERSIONS_DIR, { recursive: true });
 }
 
 // Clean up stale .tmp file from a previous crashed write
@@ -61,6 +70,112 @@ function writeDataFile(data) {
     try { if (existsSync(tmp)) unlinkSync(tmp); } catch { /* best effort */ }
     throw err;
   }
+}
+
+// --- Version management helpers ---
+function readManifest() {
+  try {
+    if (!existsSync(MANIFEST_FILE)) return { versions: [] };
+    const raw = readFileSync(MANIFEST_FILE, "utf-8");
+    return JSON.parse(raw);
+  } catch {
+    // Corrupt manifest — start fresh
+    try { renameSync(MANIFEST_FILE, MANIFEST_FILE + ".corrupt"); } catch { /* best effort */ }
+    return { versions: [] };
+  }
+}
+
+function writeManifest(manifest) {
+  const tmp = MANIFEST_FILE + ".tmp";
+  try {
+    writeFileSync(tmp, JSON.stringify(manifest, null, 2), "utf-8");
+    renameSync(tmp, MANIFEST_FILE);
+  } catch (err) {
+    try { if (existsSync(tmp)) unlinkSync(tmp); } catch { /* best effort */ }
+    throw err;
+  }
+}
+
+function createVersion(label) {
+  const currentData = readDataFile();
+  if (!currentData) throw new Error("No data to version");
+
+  const hash = createHash("md5")
+    .update(JSON.stringify(currentData))
+    .digest("hex")
+    .slice(0, 8);
+  const timestamp = Date.now();
+  const id = `v_${timestamp}_${hash}`;
+  const versionFile = join(VERSIONS_DIR, `${id}.json`);
+
+  // Write snapshot (atomic)
+  const tmp = versionFile + ".tmp";
+  writeFileSync(tmp, JSON.stringify(currentData, null, 2), "utf-8");
+  renameSync(tmp, versionFile);
+
+  // Update manifest
+  const manifest = readManifest();
+  const entry = {
+    id,
+    timestamp,
+    label,
+    sessionCount: (currentData.sessions || []).length,
+    commitCount: (currentData.commits || []).length,
+  };
+  manifest.versions.unshift(entry); // newest first
+
+  // FIFO cleanup — remove oldest if over limit
+  while (manifest.versions.length > MAX_VERSIONS) {
+    const oldest = manifest.versions.pop();
+    try { unlinkSync(join(VERSIONS_DIR, `${oldest.id}.json`)); } catch { /* ignore */ }
+  }
+
+  writeManifest(manifest);
+  return entry;
+}
+
+function restoreVersion(versionId) {
+  const versionFile = join(VERSIONS_DIR, `${versionId}.json`);
+  if (!existsSync(versionFile)) throw new Error("Version not found");
+
+  const raw = readFileSync(versionFile, "utf-8");
+  const data = JSON.parse(raw);
+  // Validate data shape before writing
+  if (
+    !data ||
+    typeof data !== "object" ||
+    !Array.isArray(data.sessions) ||
+    !Array.isArray(data.commits) ||
+    !data.settings ||
+    typeof data.settings !== "object" ||
+    Array.isArray(data.settings)
+  ) {
+    throw new Error("Version data has invalid shape");
+  }
+  writeDataFile(data);
+}
+
+function deleteVersion(versionId) {
+  const versionFile = join(VERSIONS_DIR, `${versionId}.json`);
+  try { if (existsSync(versionFile)) unlinkSync(versionFile); } catch { /* best effort */ }
+
+  const manifest = readManifest();
+  manifest.versions = manifest.versions.filter((v) => v.id !== versionId);
+  writeManifest(manifest);
+}
+
+// Validate version ID format: must be v_<digits>_<8 hex chars>
+function validateVersionId(req, res) {
+  const id = req.params.id;
+  if (!id || typeof id !== "string") {
+    res.status(400).json({ error: "Missing version ID" });
+    return null;
+  }
+  if (!/^v_\d+_[0-9a-f]{8}$/.test(id)) {
+    res.status(400).json({ error: "Invalid version ID format" });
+    return null;
+  }
+  return id;
 }
 
 // --- Request logging ---
@@ -118,6 +233,13 @@ app.get("/api/git/health", async (_req, res) => {
   } catch {
     res.json({ status: "ok", git: false, version: null });
   }
+});
+
+// =====================================================
+// GET /api/health — lightweight server liveness check
+// =====================================================
+app.get("/api/health", (_req, res) => {
+  res.json({ status: "ok", uptime: process.uptime() });
 });
 
 // =====================================================
@@ -341,6 +463,136 @@ app.delete("/api/data", (_req, res) => {
   } catch (err) {
     console.error("DevTrack: failed to delete data file:", err.message);
     res.status(500).json({ error: "Failed to clear data" });
+  }
+});
+
+// =====================================================
+// GET /api/data/versions — list all stored versions
+// =====================================================
+app.get("/api/data/versions", (_req, res) => {
+  try {
+    const manifest = readManifest();
+    res.json({ versions: manifest.versions || [] });
+  } catch (err) {
+    console.error("DevTrack: failed to read versions:", err.message);
+    res.status(500).json({ error: "Failed to read versions" });
+  }
+});
+
+// =====================================================
+// GET /api/data/versions/:id — get a specific version snapshot
+// =====================================================
+app.get("/api/data/versions/:id", (req, res) => {
+  try {
+    const id = validateVersionId(req, res);
+    if (!id) return;
+    const versionFile = join(VERSIONS_DIR, `${id}.json`);
+    if (!existsSync(versionFile)) {
+      return res.status(404).json({ error: "Version not found" });
+    }
+    const raw = readFileSync(versionFile, "utf-8");
+    const data = JSON.parse(raw);
+    res.json({ exists: true, data });
+  } catch (err) {
+    console.error("DevTrack: failed to read version:", err.message);
+    res.status(500).json({ error: "Failed to read version" });
+  }
+});
+
+// =====================================================
+// POST /api/data/versions — create a version snapshot
+// =====================================================
+app.post("/api/data/versions", (req, res) => {
+  try {
+    const { label } = req.body || {};
+    if (!label || typeof label !== "string") {
+      return res.status(400).json({ error: "Missing or invalid 'label'" });
+    }
+    writeQueue = writeQueue
+      .then(() => {
+        const entry = createVersion(label);
+        return entry;
+      })
+      .then((entry) => {
+        res.json({ ok: true, version: entry });
+      })
+      .catch((err) => {
+        console.error("DevTrack: version creation error:", err.message);
+        if (!res.headersSent) res.status(500).json({ error: err.message });
+      });
+  } catch (err) {
+    console.error("DevTrack: version creation failed:", err.message);
+    res.status(500).json({ error: "Failed to create version" });
+  }
+});
+
+// =====================================================
+// POST /api/data/versions/:id/restore — restore a version
+// =====================================================
+app.post("/api/data/versions/:id/restore", (req, res) => {
+  try {
+    const versionId = validateVersionId(req, res);
+    if (!versionId) return;
+    writeQueue = writeQueue
+      .then(() => {
+        // Auto-backup current data before restoring
+        createVersion("pre-restore");
+        restoreVersion(versionId);
+      })
+      .then(() => {
+        res.json({ ok: true });
+      })
+      .catch((err) => {
+        console.error("DevTrack: version restore error:", err.message);
+        if (!res.headersSent) res.status(500).json({ error: err.message });
+      });
+  } catch (err) {
+    console.error("DevTrack: version restore failed:", err.message);
+    res.status(500).json({ error: "Failed to restore version" });
+  }
+});
+
+// =====================================================
+// DELETE /api/data/versions/:id — delete a single version
+// =====================================================
+app.delete("/api/data/versions/:id", (req, res) => {
+  try {
+    const versionId = validateVersionId(req, res);
+    if (!versionId) return;
+    writeQueue = writeQueue
+      .then(() => { deleteVersion(versionId); })
+      .then(() => { res.json({ ok: true }); })
+      .catch((err) => {
+        console.error("DevTrack: version delete error:", err.message);
+        if (!res.headersSent) res.status(500).json({ error: err.message });
+      });
+  } catch (err) {
+    console.error("DevTrack: version delete failed:", err.message);
+    res.status(500).json({ error: "Failed to delete version" });
+  }
+});
+
+// =====================================================
+// DELETE /api/data/versions — delete all versions
+// =====================================================
+app.delete("/api/data/versions", (_req, res) => {
+  try {
+    writeQueue = writeQueue
+      .then(() => {
+        const files = readdirSync(VERSIONS_DIR).filter((f) => f.endsWith(".json") && f !== "manifest.json");
+        for (const f of files) {
+          try { unlinkSync(join(VERSIONS_DIR, f)); } catch { /* best effort */ }
+        }
+        writeManifest({ versions: [] });
+        res.json({ ok: true, deletedCount: files.length });
+      })
+      .catch((err) => {
+        console.error("DevTrack: bulk version delete error:", err.message);
+        if (!res.headersSent) res.status(500).json({ error: err.message });
+      });
+  } catch (err) {
+    console.error("DevTrack: failed to delete all versions:", err.message);
+    res.status(500).json({ error: "Failed to delete versions" });
   }
 });
 

@@ -17,6 +17,7 @@ import {
   ResponsiveContainer,
 } from "recharts";
 import { generateExcelReport, generateCSVReport, getExportPreview } from "./utils/exportEngine";
+import { computeDiff, applyPush, applyPull, applyMerge, previewSync } from "./utils/syncEngine";
 
 // Icons as SVG components
 const Icon = ({ path, size = 20, className = "" }) => (
@@ -452,6 +453,53 @@ function validateDataShape(parsed) {
   );
 }
 
+// Deep-sanitize every session/commit object so missing or invalid fields get safe defaults.
+// Defence-in-depth: run after load(), server sync, and version restore.
+function sanitizeData(data) {
+  if (!data || typeof data !== "object") return null;
+  const validStatuses = ["running", "paused", "completed"];
+  return {
+    sessions: (Array.isArray(data.sessions) ? data.sessions : []).map((s) => ({
+      id: s.id || `s_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+      type: s.type || "work",
+      start: typeof s.start === "number" ? s.start : Date.now(),
+      end: s.end ?? null,
+      duration: typeof s.duration === "number" ? s.duration : 0,
+      tags: Array.isArray(s.tags) ? s.tags : [],
+      notes: typeof s.notes === "string" ? s.notes : "",
+      status: validStatuses.includes(s.status) ? s.status : "completed",
+      pauses: Array.isArray(s.pauses) ? s.pauses : [],
+      ...(s.totalWorkTime != null ? { totalWorkTime: s.totalWorkTime } : {}),
+      ...(s.totalBreakTime != null ? { totalBreakTime: s.totalBreakTime } : {}),
+    })),
+    commits: (Array.isArray(data.commits) ? data.commits : []).map((c) => ({
+      sha: c.sha || "unknown",
+      message: c.message || "",
+      repo: c.repo || "",
+      repoPath: c.repoPath || "",
+      timestamp: typeof c.timestamp === "number" ? c.timestamp : Date.now(),
+      author: c.author || "",
+      authorEmail: c.authorEmail || "",
+      branch: c.branch || "",
+      source: c.source || "manual",
+      filesChanged: typeof c.filesChanged === "number" ? c.filesChanged : 0,
+      insertions: typeof c.insertions === "number" ? c.insertions : 0,
+      deletions: typeof c.deletions === "number" ? c.deletions : 0,
+    })),
+    settings: {
+      dailyGoal: data.settings?.dailyGoal ?? 8,
+      trackedRepos: Array.isArray(data.settings?.trackedRepos)
+        ? data.settings.trackedRepos
+        : [],
+      gitAuthors: data.settings?.gitAuthors ?? {
+        identities: [],
+        autoDetected: null,
+      },
+    },
+    ui: { ...DEFAULT_DATA.ui, ...(data.ui || {}) },
+  };
+}
+
 function migrate(parsed) {
   if ("githubToken" in parsed.settings || "githubUser" in parsed.settings) {
     delete parsed.settings.githubToken;
@@ -505,7 +553,7 @@ const load = () => {
     if (!raw) return null;
     const parsed = JSON.parse(raw);
     if (!validateDataShape(parsed)) return null;
-    return migrate(parsed);
+    return sanitizeData(migrate(parsed));
   } catch {
     return null;
   }
@@ -519,33 +567,41 @@ const loadFromServer = async () => {
     if (!result.exists || !result.data) return null;
     const parsed = result.data;
     if (!validateDataShape(parsed)) return null;
-    return migrate(parsed);
+    return sanitizeData(migrate(parsed));
   } catch {
     return null;
   }
 };
 
+// Module-level refs for server retry coordination (set inside App())
+const _serverSaveFn = { current: null }; // will be assigned in App()
+const _onQuotaExceeded = { current: null };
+
 const save = (data) => {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+    if (_onQuotaExceeded.current) _onQuotaExceeded.current(false);
   } catch (e) {
     if (
       e instanceof DOMException &&
       (e.name === "QuotaExceededError" || e.code === 22)
     ) {
-      console.error("DevTrack: localStorage quota exceeded. Data not saved.");
+      if (_onQuotaExceeded.current) _onQuotaExceeded.current(true);
     } else {
       throw e;
     }
   }
-  // Fire-and-forget save to server (durable backup)
-  fetch("/api/data", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ data }),
-  }).catch(() => {
-    console.warn("DevTrack: server backup unavailable — data saved to localStorage only");
-  });
+  // Server save (with retry logic via _serverSaveFn)
+  if (_serverSaveFn.current) {
+    _serverSaveFn.current(data);
+  } else {
+    // Fallback: fire-and-forget (before App mounts)
+    fetch("/api/data", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ data }),
+    }).catch(() => {});
+  }
 };
 
 export default function App() {
@@ -568,17 +624,100 @@ export default function App() {
     return Date.now() - active.start;
   });
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [syncOpen, setSyncOpen] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [toast, setToast] = useState(null);
+  const [quotaWarning, setQuotaWarning] = useState(false);
+  const [serverStatus, setServerStatus] = useState("connected"); // connected | disconnected
+  const serverStatusRef = useRef("connected");
+  const retryCountRef = useRef(0);
+  const retryTimerRef = useRef(null);
+  const pendingSaveRef = useRef(false);
   const saveTimer = useRef(null);
 
+  // Wire module-level save hooks
+  _onQuotaExceeded.current = setQuotaWarning;
+
+  // Server save with exponential-backoff retry (max 3 attempts)
+  const saveToServer = useCallback((data, attempt = 1) => {
+    if (retryTimerRef.current && attempt === 1) {
+      clearTimeout(retryTimerRef.current);
+      retryTimerRef.current = null;
+    }
+    fetch("/api/data", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ data }),
+    }).then(() => {
+      retryCountRef.current = 0;
+      if (serverStatusRef.current !== "connected") {
+        serverStatusRef.current = "connected";
+        setServerStatus("connected");
+      }
+    }).catch(() => {
+      if (attempt < 3) {
+        retryTimerRef.current = setTimeout(
+          () => saveToServer(data, attempt + 1),
+          1000 * Math.pow(2, attempt - 1),
+        );
+      } else {
+        retryCountRef.current = 0;
+        if (serverStatusRef.current !== "disconnected") {
+          serverStatusRef.current = "disconnected";
+          setServerStatus("disconnected");
+        }
+      }
+    });
+  }, []);
+  _serverSaveFn.current = saveToServer;
+
+  // Debounced save — tracks whether a save is pending for lifecycle handlers
   useEffect(() => {
+    if (syncOpen) return; // skip auto-save during sync (SyncView manages its own saves)
     if (saveTimer.current) clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(() => save(data), 300);
+    pendingSaveRef.current = true;
+    saveTimer.current = setTimeout(() => {
+      save(data);
+      pendingSaveRef.current = false;
+    }, 300);
     return () => {
       if (saveTimer.current) clearTimeout(saveTimer.current);
     };
-  }, [data]);
+  }, [data, syncOpen]);
+
+  // Force-save on page close / tab switch — single shared handler for both events.
+  // visibilitychange fires first (hidden), beforeunload fires next on actual close.
+  // We save localStorage synchronously + fire a keepalive fetch for the server backup.
+  // The handler is idempotent: after the first call, pendingSaveRef is cleared.
+  const forceSaveIfNeeded = useCallback(() => {
+    if (!pendingSaveRef.current) return;
+    clearTimeout(saveTimer.current);
+    const d = dataRef.current;
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(d)); } catch {}
+    // fetch with keepalive survives page teardown (up to 256 KB) and Express parses it correctly
+    try {
+      fetch("/api/data", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ data: d }),
+        keepalive: true,
+      }).catch(() => {});
+    } catch {}
+    pendingSaveRef.current = false;
+  }, []);
+
+  useEffect(() => {
+    window.addEventListener("beforeunload", forceSaveIfNeeded);
+    return () => window.removeEventListener("beforeunload", forceSaveIfNeeded);
+  }, [forceSaveIfNeeded]);
+
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "hidden") forceSaveIfNeeded();
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
+  }, [forceSaveIfNeeded]);
 
   // Persist UI preferences alongside data (piggybacks on existing debounce + server save)
   const updateUi = (updates) => {
@@ -593,15 +732,55 @@ export default function App() {
 
   // Sync from server on mount — only apply if user hasn't changed data during the async gap.
   // The ref guards against React 18 Strict Mode's double-mount in development.
+  // Also performs: health check, corruption recovery from server.
   const serverSynced = useRef(false);
   const dataRef = useRef(data);
   useEffect(() => { dataRef.current = data; }, [data]);
   useEffect(() => {
     if (serverSynced.current) return;
     serverSynced.current = true;
+
+    // Health check — sets initial server status
+    fetch("/api/health")
+      .then((r) => {
+        if (!r.ok) throw new Error();
+        serverStatusRef.current = "connected";
+        setServerStatus("connected");
+      })
+      .catch(() => {
+        serverStatusRef.current = "disconnected";
+        setServerStatus("disconnected");
+      });
+
     const mountHash = JSON.stringify(data);
+    // initialData was captured during first useState — reuse it to avoid redundant load()
+    const localWasNull = !initialData;
 
     loadFromServer().then((serverData) => {
+      // Corruption recovery: if localStorage was empty/corrupt but server has data, restore from server
+      if (localWasNull && serverData) {
+        const restored = sanitizeData(serverData);
+        if (restored) {
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(restored));
+          setData(restored);
+          setView(restored.ui?.view || "dashboard");
+          const running = restored.sessions.find((s) => s.status === "running" || s.status === "paused") || null;
+          if (running) {
+            setActiveSession(running);
+            if (running.status === "paused") {
+              const currentPause = (running.pauses || []).find((p) => p.end === null);
+              setElapsed(currentPause ? Date.now() - currentPause.start : 0);
+            } else {
+              const paused = (running.pauses || []).reduce((s, p) => s + ((p.end || 0) - p.start), 0);
+              setElapsed(Date.now() - running.start - paused);
+            }
+          }
+          showToast("Local data was corrupted — recovered from server backup", "warning");
+          return;
+        }
+      }
+
+      // Normal server sync path
       if (!serverData) return;
       if (JSON.stringify(dataRef.current) !== mountHash) return;
 
@@ -621,6 +800,27 @@ export default function App() {
       }
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Cross-tab conflict detection — listen for localStorage writes from other tabs
+  useEffect(() => {
+    const handleStorageChange = (e) => {
+      if (e.key !== STORAGE_KEY || !e.newValue) return;
+      // Only warn if the debounced save timer is still ticking (genuine unsaved change)
+      if (saveTimer.current) {
+        showToast("Another tab modified your data — your unsaved changes may conflict.", "warning");
+      } else {
+        // No pending local changes — safely adopt the other tab's data
+        try {
+          const parsed = JSON.parse(e.newValue);
+          if (validateDataShape(parsed)) {
+            setData(sanitizeData(migrate(parsed)));
+          }
+        } catch { /* ignore malformed */ }
+      }
+    };
+    window.addEventListener("storage", handleStorageChange);
+    return () => window.removeEventListener("storage", handleStorageChange);
   }, []);
 
   // Timer tick — update every second while session is active (running or paused)
@@ -643,6 +843,36 @@ export default function App() {
     const id = setInterval(tick, 1000);
     return () => clearInterval(id);
   }, [activeSession]);
+
+  // Session checkpoint — every 30 s while a session is active, persist a checkpoint
+  // so that on crash/reload the pause state is at most 30 s inaccurate.
+  const checkpointTimerRef = useRef(null);
+  useEffect(() => {
+    if (!activeSession || activeSession.status === "completed") {
+      if (checkpointTimerRef.current) {
+        clearInterval(checkpointTimerRef.current);
+        checkpointTimerRef.current = null;
+      }
+      return;
+    }
+    if (checkpointTimerRef.current) return; // already running
+    checkpointTimerRef.current = setInterval(() => {
+      const sid = activeSession?.id;
+      if (!sid) return;
+      setData((d) => ({
+        ...d,
+        sessions: d.sessions.map((s) =>
+          s.id === sid ? { ...s, _checkpoint: Date.now() } : s
+        ),
+      }));
+    }, 30000);
+    return () => {
+      if (checkpointTimerRef.current) {
+        clearInterval(checkpointTimerRef.current);
+        checkpointTimerRef.current = null;
+      }
+    };
+  }, [activeSession?.id, activeSession?.status]);
 
   const toastTimer = useRef(null);
 
@@ -720,6 +950,56 @@ export default function App() {
     setActiveSession((current) => {
       if (!current) return null;
       const now = Date.now();
+
+      // Auto-sync all tracked repos so commits made during the session are captured
+      const repos = current && current.start ? (dataRef.current.settings.trackedRepos || []) : [];
+      if (repos.length > 0) {
+        (async () => {
+          for (const repo of repos) {
+            try {
+              const res = await fetch("/api/git/log", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ path: repo.path, count: 200 }),
+              });
+              if (!res.ok) continue;
+              const result = await res.json();
+              setData((d) => {
+                const others = d.commits.filter(
+                  (c) => c.source !== "local" || c.repoPath !== repo.path,
+                );
+                const newCommits = result.commits.map((c) => ({
+                  ...c,
+                  source: "local",
+                }));
+                return {
+                  ...d,
+                  commits: [...newCommits, ...others],
+                  settings: {
+                    ...d.settings,
+                    trackedRepos: (d.settings.trackedRepos || []).map((r) =>
+                      r.id === repo.id ? { ...r, lastSync: Date.now() } : r,
+                    ),
+                  },
+                };
+              });
+            } catch { /* non-critical: skip repo if git server unavailable */ }
+          }
+          // After all repos are synced, update session commitIds with fresh data
+          setData((d) => {
+            const sessionCommits = d.commits.filter(
+              (c) => c.timestamp >= current.start && c.timestamp <= now,
+            );
+            return {
+              ...d,
+              sessions: d.sessions.map((s) =>
+                s.id === current.id ? { ...s, commitIds: sessionCommits.map((c) => c.sha) } : s,
+              ),
+            };
+          });
+        })();
+      }
+
       // Close any open pause
       let pauses = current.pauses;
       if (current.status === "paused" && pauses.length > 0) {
@@ -740,6 +1020,8 @@ export default function App() {
         status: "completed",
       };
       setData((d) => {
+        // Pre-populate commitIds from whatever commits we already have;
+        // the async sync above will refresh them with fresh data shortly after
         const sessionCommits = d.commits.filter(
           (c) =>
             c.timestamp >= current.start &&
@@ -885,6 +1167,32 @@ export default function App() {
     setActiveSession(null);
     setElapsed(0);
     fetch("/api/data", { method: "DELETE" }).catch(() => {});
+  };
+
+  // Apply a sync result and re-derive running session state
+  const applySyncResult = (newData) => {
+    setData(newData);
+    const running = (newData.sessions || []).find(
+      (s) => s.status === "running" || s.status === "paused"
+    );
+    if (running) {
+      setActiveSession(running);
+      if (running.status === "paused") {
+        // Match timer tick semantics: total pause time = completed pauses + current pause
+        const completedPauses = (running.pauses || [])
+          .filter((p) => p.end !== null)
+          .reduce((s, p) => s + (p.end - p.start), 0);
+        const currentPauseStart = (running.pauses || []).find((p) => p.end === null)?.start || Date.now();
+        setElapsed(completedPauses + (Date.now() - currentPauseStart));
+      } else {
+        const paused = (running.pauses || []).reduce((s, p) => s + ((p.end || 0) - p.start), 0);
+        setElapsed(Date.now() - running.start - paused);
+      }
+    } else {
+      setActiveSession(null);
+      setElapsed(0);
+    }
+    setView(newData.ui?.view || "dashboard");
   };
 
   // Git-estimated session import
@@ -1057,7 +1365,9 @@ export default function App() {
   ];
 
   return (
-    <div className="min-h-screen bg-stone-950 text-stone-100 font-sans flex">
+    <div className="min-h-screen bg-stone-950 text-stone-100 font-sans">
+      {/* App content — inerted during sync to prevent edits underneath the modal */}
+      <div className="min-h-screen flex" inert={syncOpen || undefined}>
       {/* Warm ambient gradient */}
       <div className="fixed inset-0 pointer-events-none bg-gradient-to-br from-amber-950/20 via-transparent to-orange-950/10" />
       {/* Mobile header bar */}
@@ -1321,6 +1631,7 @@ export default function App() {
           </motion.div>
         </AnimatePresence>
       </main>
+      </div>{/* end inerted content wrapper */}
 
       <SettingsModal
         key={settingsOpen ? "open" : "closed"}
@@ -1330,8 +1641,45 @@ export default function App() {
         updateSettings={updateSettings}
         showToast={showToast}
         onReset={handleReset}
+        onOpenSync={() => { setSettingsOpen(false); setSyncOpen(true); }}
+      />
+      <SyncView
+        key={syncOpen ? "open" : "closed"}
+        open={syncOpen}
+        onClose={() => setSyncOpen(false)}
+        localData={data}
+        applySyncResult={applySyncResult}
+        showToast={showToast}
       />
       <Toast toast={toast} />
+
+      {/* Quota warning banner */}
+      {quotaWarning && (
+        <div className="fixed top-0 left-0 right-0 z-50 bg-amber-600/90 text-white text-sm text-center py-2 px-4">
+          Storage is full — your changes are not being saved locally.
+          <button
+            className="ml-3 underline hover:no-underline font-medium"
+            onClick={() => setQuotaWarning(false)}
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
+      {/* Server backup status dot — bottom-right corner */}
+      <div
+        className="fixed bottom-4 right-4 z-50 group flex items-end justify-end"
+        title={serverStatus === "connected" ? "Server backup: connected" : "Server backup: disconnected"}
+      >
+        <div
+          className={`w-3 h-3 rounded-full transition-colors ${
+            serverStatus === "connected" ? "bg-emerald-500" : "bg-red-500"
+          }`}
+        />
+        <span className="sr-only group-hover:not-sr-only group-hover:absolute group-hover:bottom-6 group-hover:right-0 group-hover:bg-stone-800 group-hover:text-stone-200 group-hover:text-xs group-hover:px-2 group-hover:py-1 group-hover:rounded group-hover:whitespace-nowrap group-hover:shadow-lg">
+          Server backup: {serverStatus === "connected" ? "connected" : "disconnected"}
+        </span>
+      </div>
     </div>
   );
 }
@@ -4088,7 +4436,7 @@ function WorkLogView({
 }
 
 // ============ SETTINGS MODAL ============
-function SettingsModal({ open, onClose, data, updateSettings, showToast, onReset }) {
+function SettingsModal({ open, onClose, data, updateSettings, showToast, onReset, onOpenSync }) {
   const [form, setForm] = useState(data.settings);
   const [newIdentityName, setNewIdentityName] = useState("");
   const [newIdentityEmail, setNewIdentityEmail] = useState("");
@@ -4279,6 +4627,24 @@ function SettingsModal({ open, onClose, data, updateSettings, showToast, onReset
             </div>
           </div>
 
+          {/* Data Sync */}
+          <div className="border-t border-stone-800 pt-4">
+            <label className="text-xs text-stone-400 uppercase tracking-wide">
+              Data Sync
+            </label>
+            <p className="text-[11px] text-stone-500 mb-3">
+              Compare and sync your browser data with the server backup.
+            </p>
+            <button
+              onClick={() => { onClose(); onOpenSync?.(); }}
+              className="w-full py-2 rounded-lg bg-stone-800 border border-stone-700 text-sm
+                         hover:bg-stone-700 transition-colors flex items-center justify-center gap-2"
+            >
+              <Icon path={ICONS.refresh} size={16} />
+              Sync Data
+            </button>
+          </div>
+
           <div className="flex gap-2">
             <button
               onClick={() => {
@@ -4332,4 +4698,1050 @@ function Toast({ toast }) {
       </AnimatePresence>
     </div>
   );
+}
+
+// ============ SYNC VIEW ============
+function SyncView({ open, onClose, localData, applySyncResult, showToast }) {
+  // Flow state machine
+  const [phase, setPhase] = useState("loading"); // loading | error | no-server | no-local | identical | summary | strategy | conflicts | dryrun | executing | done
+  const [serverData, setServerData] = useState(null);
+  const [diffResult, setDiffResult] = useState(null);
+  const [strategy, setStrategy] = useState(null);
+  const [resolutions, setResolutions] = useState({});
+  const [preview, setPreview] = useState(null);
+  const [versions, setVersions] = useState([]);
+  const [expandedSections, setExpandedSections] = useState({});
+  const [showVersions, setShowVersions] = useState(false);
+  const [previewVersion, setPreviewVersion] = useState(null);
+
+  // Escape key handler
+  useEffect(() => {
+    if (!open) return;
+    const handleKey = (e) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  }, [open, onClose]);
+
+  // Kick off diff computation when modal opens
+  useEffect(() => {
+    if (!open) return;
+    setPhase("loading");
+    setStrategy(null);
+    setResolutions({});
+    setPreview(null);
+    setShowVersions(false);
+    setPreviewVersion(null);
+
+    (async () => {
+      try {
+        const res = await fetch("/api/data");
+        if (!res.ok) throw new Error("Server error");
+        const result = await res.json();
+
+        let srvData = null;
+        if (result.exists && result.data) {
+          if (validateDataShape(result.data)) {
+            srvData = migrate(result.data);
+          }
+        }
+
+        setServerData(srvData);
+
+        // Edge case: no server data
+        if (!srvData) {
+          const localEmpty = !localData?.sessions?.length && !localData?.commits?.length;
+          if (localEmpty) {
+            setPhase("no-data");
+          } else {
+            setPhase("no-server");
+          }
+          return;
+        }
+
+        // Edge case: no local data (just defaults)
+        const localEmpty = !localData?.sessions?.length && !localData?.commits?.length;
+        if (localEmpty) {
+          setPhase("no-local");
+          return;
+        }
+
+        const diff = computeDiff(localData, srvData);
+        setDiffResult(diff);
+
+        // Edge case: both identical
+        if (diff.summary.localOnlyCount === 0 && diff.summary.serverOnlyCount === 0 && diff.summary.conflictCount === 0) {
+          setPhase("identical");
+          return;
+        }
+
+        setPhase("summary");
+      } catch {
+        setPhase("error");
+      }
+
+      // Also load versions
+      try {
+        const vRes = await fetch("/api/data/versions");
+        if (vRes.ok) {
+          const vData = await vRes.json();
+          setVersions(vData.versions || []);
+        }
+      } catch { /* non-critical */ }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  // Helper: toggle expandable section
+  const toggleSection = (key) => {
+    setExpandedSections((prev) => ({ ...prev, [key]: !prev[key] }));
+  };
+
+  // Helper: set resolution for a conflict item
+  const setResolution = (section, id, side) => {
+    setResolutions((prev) => ({
+      ...prev,
+      [section]: { ...(prev[section] || {}), [id]: side },
+    }));
+  };
+
+  // Bulk resolve all conflicts for a section
+  const resolveAll = (section, side) => {
+    if (!diffResult) return;
+    const items = diffResult[section]?.conflicts || [];
+    const updates = {};
+    for (const item of items) {
+      updates[item.id] = side;
+    }
+    setResolutions((prev) => ({ ...prev, [section]: updates }));
+  };
+
+  // Go to strategy select
+  const selectStrategy = (s) => {
+    setStrategy(s);
+    if (s === "merge" && diffResult) {
+      // Check if there are actual conflicts
+      const hasConflicts =
+        diffResult.sessions.conflicts.length > 0 ||
+        diffResult.commits.conflicts.length > 0 ||
+        diffResult.settings.conflicts.length > 0 ||
+        diffResult.ui.conflicts.length > 0;
+      if (hasConflicts) {
+        // Auto-resolve everything to "local" as default
+        const sessionAutoRes = {};
+        const commitAutoRes = {};
+        for (const c of diffResult.sessions.conflicts) sessionAutoRes[c.id] = "local";
+        for (const c of diffResult.commits.conflicts) commitAutoRes[c.id] = "local";
+        setResolutions({ sessions: sessionAutoRes, commits: commitAutoRes, settings: {}, ui: {} });
+        setPhase("conflicts");
+        return;
+      }
+    }
+    // No conflicts or non-merge: go straight to dry run
+    goToDryRun(s);
+  };
+
+  const goToDryRun = (s) => {
+    const p = previewSync(s || strategy, localData, serverData, diffResult, s === "merge" || strategy === "merge" ? resolutions : {});
+    setPreview(p);
+    setPhase("dryrun");
+  };
+
+  // Execute the sync
+  const executeSync = async () => {
+    setPhase("executing");
+    try {
+      let resultData;
+      if (strategy === "push") {
+        resultData = applyPush(localData);
+      } else if (strategy === "pull") {
+        resultData = applyPull(serverData);
+      } else {
+        resultData = applyMerge(localData, serverData, diffResult, resolutions);
+      }
+
+      // Version backup — only if there's disk data to back up
+      if (serverData) {
+        try {
+          await fetch("/api/data/versions", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ label: `pre-sync-${strategy}` }),
+          });
+        } catch { /* non-critical — backup is best effort */ }
+      }
+
+      // Explicitly persist to disk (don't rely on debounced save)
+      try {
+        await fetch("/api/data", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ data: resultData }),
+        });
+      } catch { /* localStorage save via applySyncResult still fires */ }
+
+      applySyncResult(resultData);
+      setPhase("done");
+
+      // Refresh versions list
+      try {
+        const vRes = await fetch("/api/data/versions");
+        if (vRes.ok) {
+          const vData = await vRes.json();
+          setVersions(vData.versions || []);
+        }
+      } catch { /* non-critical */ }
+    } catch {
+      showToast("Sync failed — your data was not changed", "error");
+      setPhase("dryrun");
+    }
+  };
+
+  // Execute push-only for no-server case
+  const executePushOnly = async () => {
+    setPhase("executing");
+    setStrategy("push");
+    try {
+      // No version backup needed — there's no disk data to back up
+
+      // Explicitly persist to disk (don't rely on debounced save)
+      await fetch("/api/data", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ data: localData }),
+      });
+
+      setPreview({
+        strategy: "push",
+        description: ["Local data pushed to server."],
+        resultSummary: {
+          sessionsCount: localData?.sessions?.length || 0,
+          commitsCount: localData?.commits?.length || 0,
+        },
+      });
+      applySyncResult(localData);
+      setPhase("done");
+    } catch {
+      showToast("Push failed", "error");
+      setPhase("no-server");
+    }
+  };
+
+  // Execute pull-only for no-local case
+  const executePullOnly = async () => {
+    setPhase("executing");
+    setStrategy("pull");
+    try {
+      // Version backup — only if there's disk data to back up
+      if (serverData) {
+        try {
+          await fetch("/api/data/versions", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ label: "pre-sync-pull" }),
+          });
+        } catch { /* non-critical */ }
+      }
+
+      setPreview({
+        strategy: "pull",
+        description: ["Server data pulled to browser."],
+        resultSummary: {
+          sessionsCount: serverData?.sessions?.length || 0,
+          commitsCount: serverData?.commits?.length || 0,
+        },
+      });
+      applySyncResult(serverData);
+      setPhase("done");
+    } catch {
+      showToast("Pull failed", "error");
+      setPhase("no-local");
+    }
+  };
+
+  // Restore a version
+  const restoreVersion = async (vId) => {
+    if (!confirm("Restore this version? Your current data will be backed up first.")) return;
+    try {
+      const res = await fetch(`/api/data/versions/${vId}/restore`, { method: "POST" });
+      if (!res.ok) throw new Error();
+      // Reload the restored data
+      const dataRes = await fetch("/api/data");
+      if (dataRes.ok) {
+        const dataResult = await dataRes.json();
+        if (dataResult.exists && dataResult.data) {
+          if (!validateDataShape(dataResult.data)) {
+            showToast("Version data is corrupted — restore aborted", "error");
+            return;
+          }
+          const restored = sanitizeData(migrate(dataResult.data));
+          if (!restored) {
+            showToast("Version data could not be sanitized — restore aborted", "error");
+            return;
+          }
+          applySyncResult(restored);
+        }
+      }
+      showToast("Version restored");
+      // Refresh versions
+      const vRes = await fetch("/api/data/versions");
+      if (vRes.ok) {
+        const vData = await vRes.json();
+        setVersions(vData.versions || []);
+      }
+      onClose();
+    } catch {
+      showToast("Restore failed", "error");
+    }
+  };
+
+  // Preview a version (diff vs current)
+  const openVersionPreview = async (vId) => {
+    try {
+      const res = await fetch(`/api/data/versions/${vId}`);
+      if (!res.ok) return;
+      const result = await res.json();
+      if (result.exists && result.data) {
+        if (!validateDataShape(result.data)) {
+          showToast("Version snapshot is corrupted", "error");
+          return;
+        }
+        const versionData = sanitizeData(migrate(result.data));
+        if (!versionData) return;
+        const diff = computeDiff(localData, versionData);
+        setPreviewVersion({ id: vId, data: versionData, diff });
+      }
+    } catch { /* ignore */ }
+  };
+
+  // Delete a version
+  const deleteVersion = async (vId) => {
+    try {
+      await fetch(`/api/data/versions/${vId}`, { method: "DELETE" });
+      setVersions((prev) => prev.filter((v) => v.id !== vId));
+      if (previewVersion?.id === vId) setPreviewVersion(null);
+    } catch { /* ignore */ }
+  };
+
+  if (!open) return null;
+
+  // ─── Shared header ───
+  const renderHeader = (title, hideClose = false) => (
+    <div className="flex items-center justify-between mb-5">
+      <h3 className="text-lg font-bold">{title}</h3>
+      {!hideClose && (
+        <button onClick={onClose} className="text-stone-400 hover:text-white transition-colors" aria-label="Close sync">
+          ✕
+        </button>
+      )}
+    </div>
+  );
+
+  // ─── Badge helper ───
+  const Badge = ({ color, children }) => (
+    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${
+      color === "green" ? "bg-emerald-500/20 text-emerald-400" :
+      color === "blue" ? "bg-blue-500/20 text-blue-400" :
+      color === "amber" ? "bg-amber-500/20 text-amber-400" :
+      "bg-stone-700 text-stone-400"
+    }`}>
+      {children}
+    </span>
+  );
+
+  // ─── Format session brief ───
+  const sessionBrief = (s) => {
+    const dur = s.duration ? formatDuration(s.duration) : "active";
+    const date = s.start ? formatDate(s.start) : "";
+    return `${date} · ${s.type || "work"} · ${dur}`;
+  };
+
+  // ─── Format commit brief ───
+  const commitBrief = (c) => {
+    const sha = c.sha ? c.sha.slice(0, 7) : "manual";
+    const msg = c.message ? (c.message.length > 40 ? c.message.slice(0, 40) + "…" : c.message) : "no message";
+    return `${sha} ${msg} (${c.repo || "unknown"})`;
+  };
+
+  // ─── RENDER: Loading ───
+  if (phase === "loading") {
+    return (
+      <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={onClose}>
+        <motion.div initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }}
+          onClick={(e) => e.stopPropagation()} className="bg-stone-900 border border-stone-800 rounded-2xl p-6 w-full max-w-2xl">
+          {renderHeader("Data Sync")}
+          <div className="flex items-center justify-center py-12 gap-3 text-stone-400">
+            <Icon path={ICONS.refresh} size={20} className="animate-spin" />
+            <span>Loading data from server…</span>
+          </div>
+        </motion.div>
+      </div>
+    );
+  }
+
+  // ─── RENDER: Error ───
+  if (phase === "error") {
+    return (
+      <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={onClose}>
+        <motion.div initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }}
+          onClick={(e) => e.stopPropagation()} className="bg-stone-900 border border-stone-800 rounded-2xl p-6 w-full max-w-2xl">
+          {renderHeader("Data Sync")}
+          <div className="text-center py-12">
+            <p className="text-rose-400 mb-4">Cannot reach the sync server.</p>
+            <p className="text-stone-500 text-sm mb-6">Make sure the git server is running on port 9001.</p>
+            <button onClick={onClose} className="px-6 py-2 rounded-lg bg-stone-800 hover:bg-stone-700 text-sm transition-colors">
+              Close
+            </button>
+          </div>
+        </motion.div>
+      </div>
+    );
+  }
+
+  // ─── RENDER: No data on either side ───
+  if (phase === "no-data") {
+    return (
+      <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={onClose}>
+        <motion.div initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }}
+          onClick={(e) => e.stopPropagation()} className="bg-stone-900 border border-stone-800 rounded-2xl p-6 w-full max-w-2xl">
+          {renderHeader("Data Sync")}
+          <div className="text-center py-12">
+            <div className="text-stone-400 text-4xl mb-3">📭</div>
+            <p className="text-stone-300 mb-2">No data to sync.</p>
+            <p className="text-stone-500 text-sm mb-6">Neither your browser nor the server has any tracked data yet. Start tracking sessions or commits first.</p>
+            <button onClick={onClose} className="px-6 py-2 rounded-lg bg-stone-800 hover:bg-stone-700 text-sm transition-colors">
+              Close
+            </button>
+          </div>
+        </motion.div>
+      </div>
+    );
+  }
+
+  // ─── RENDER: No server data ───
+  if (phase === "no-server") {
+    return (
+      <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={onClose}>
+        <motion.div initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }}
+          onClick={(e) => e.stopPropagation()} className="bg-stone-900 border border-stone-800 rounded-2xl p-6 w-full max-w-2xl">
+          {renderHeader("Data Sync")}
+          <div className="text-center py-8">
+            <p className="text-stone-300 mb-2">No server data found.</p>
+            <p className="text-stone-500 text-sm mb-6">You can push your local data to create a server backup.</p>
+            <p className="text-stone-400 text-sm mb-6">
+              Local: {localData?.sessions?.length || 0} sessions, {localData?.commits?.length || 0} commits
+            </p>
+            <button onClick={executePushOnly}
+              className="px-6 py-2.5 rounded-lg bg-amber-500 hover:bg-amber-600 font-medium text-sm transition-colors">
+              Push Local → Server
+            </button>
+          </div>
+        </motion.div>
+      </div>
+    );
+  }
+
+  // ─── RENDER: No local data ───
+  if (phase === "no-local") {
+    return (
+      <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={onClose}>
+        <motion.div initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }}
+          onClick={(e) => e.stopPropagation()} className="bg-stone-900 border border-stone-800 rounded-2xl p-6 w-full max-w-2xl">
+          {renderHeader("Data Sync")}
+          <div className="text-center py-8">
+            <p className="text-stone-300 mb-2">No local data found.</p>
+            <p className="text-stone-500 text-sm mb-6">You can pull data from the server.</p>
+            <p className="text-stone-400 text-sm mb-6">
+              Server: {serverData?.sessions?.length || 0} sessions, {serverData?.commits?.length || 0} commits
+            </p>
+            <button onClick={executePullOnly}
+              className="px-6 py-2.5 rounded-lg bg-amber-500 hover:bg-amber-600 font-medium text-sm transition-colors">
+              Pull Server → Local
+            </button>
+          </div>
+        </motion.div>
+      </div>
+    );
+  }
+
+  // ─── RENDER: Identical ───
+  if (phase === "identical") {
+    return (
+      <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={onClose}>
+        <motion.div initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }}
+          onClick={(e) => e.stopPropagation()} className="bg-stone-900 border border-stone-800 rounded-2xl p-6 w-full max-w-2xl">
+          {renderHeader("Data Sync")}
+          <div className="text-center py-8">
+            <div className="text-emerald-400 text-4xl mb-3">✓</div>
+            <p className="text-stone-300 mb-2">Everything is in sync!</p>
+            <p className="text-stone-500 text-sm mb-6">Local and server data are identical.</p>
+            {versions.length > 0 && (
+              <button onClick={() => setShowVersions(true)}
+                className="px-6 py-2 rounded-lg bg-stone-800 hover:bg-stone-700 text-sm transition-colors mb-4">
+                View Version History ({versions.length})
+              </button>
+            )}
+            {showVersions && renderVersionHistory()}
+            <div><button onClick={onClose} className="px-6 py-2 rounded-lg bg-stone-800 hover:bg-stone-700 text-sm transition-colors">Close</button></div>
+          </div>
+        </motion.div>
+      </div>
+    );
+  }
+
+  // ─── RENDER: Version History ───
+  const renderVersionHistory = () => (
+    <div className="mt-4 text-left border-t border-stone-800 pt-4 max-h-60 overflow-y-auto">
+      <h4 className="text-sm font-medium text-stone-300 mb-3">Version History</h4>
+      {versions.length === 0 ? (
+        <p className="text-stone-500 text-sm">No versions saved yet.</p>
+      ) : (
+        <div className="space-y-2">
+          {versions.map((v) => (
+            <div key={v.id} className="flex items-center justify-between bg-stone-800/50 rounded-lg px-3 py-2">
+              <div>
+                <p className="text-sm text-stone-300">{v.label}</p>
+                <p className="text-xs text-stone-500">
+                  {formatDate(v.timestamp)} · {v.sessionCount} sessions · {v.commitCount} commits
+                </p>
+              </div>
+              <div className="flex gap-2">
+                <button onClick={() => openVersionPreview(v.id)}
+                  className="text-xs text-stone-400 hover:text-stone-200 transition-colors">Preview</button>
+                <button onClick={() => restoreVersion(v.id)}
+                  className="text-xs text-amber-400 hover:text-amber-300 transition-colors">Restore</button>
+                <button onClick={() => deleteVersion(v.id)}
+                  className="text-xs text-rose-400 hover:text-rose-300 transition-colors">Delete</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      {previewVersion && (
+        <div className="mt-3 bg-stone-800 rounded-lg p-3 border border-stone-700">
+          <div className="flex items-center justify-between mb-2">
+            <h5 className="text-xs text-stone-400 uppercase tracking-wide">Version Preview</h5>
+            <button onClick={() => setPreviewVersion(null)} className="text-stone-500 hover:text-stone-300 text-xs">✕</button>
+          </div>
+          {(() => {
+            const d = previewVersion.diff;
+            return (
+              <div className="text-xs text-stone-400 space-y-1">
+                <p>Sessions: {d.summary.localOnlyCount} local-only · {d.summary.serverOnlyCount} version-only · {d.summary.conflictCount} conflicts</p>
+                <p>Commits: {d.commits.localOnly.length} local-only · {d.commits.serverOnly.length} version-only · {d.commits.conflicts.length} conflicts</p>
+                <p>Settings: {d.settings.conflicts.length} field(s) differ</p>
+              </div>
+            );
+          })()}
+        </div>
+      )}
+    </div>
+  );
+
+  // ─── RENDER: Diff Summary ───
+  if (phase === "summary" || phase === "strategy") {
+    return (
+      <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={onClose}>
+        <motion.div initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }}
+          onClick={(e) => e.stopPropagation()}
+          className="bg-stone-900 border border-stone-800 rounded-2xl p-6 w-full max-w-2xl max-h-[85vh] overflow-y-auto">
+          {renderHeader("Data Sync — Diff Summary")}
+
+          {/* Summary cards */}
+          <div className="grid grid-cols-4 gap-3 mb-5">
+            <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-lg p-3 text-center">
+              <div className="text-lg font-bold text-emerald-400">{diffResult.sessions.localOnly.length + diffResult.commits.localOnly.length}</div>
+              <div className="text-[11px] text-stone-400">Browser only</div>
+            </div>
+            <div className="bg-blue-500/10 border border-blue-500/20 rounded-lg p-3 text-center">
+              <div className="text-lg font-bold text-blue-400">{diffResult.sessions.serverOnly.length + diffResult.commits.serverOnly.length}</div>
+              <div className="text-[11px] text-stone-400">Disk only</div>
+            </div>
+            <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg p-3 text-center">
+              <div className="text-lg font-bold text-amber-400">{diffResult.summary.conflictCount}</div>
+              <div className="text-[11px] text-stone-400">Conflicts</div>
+            </div>
+            <div className="bg-stone-800 rounded-lg p-3 text-center">
+              <div className="text-lg font-bold text-stone-400">{diffResult.summary.identicalCount}</div>
+              <div className="text-[11px] text-stone-400">Identical</div>
+            </div>
+          </div>
+
+          {/* Expandable sections */}
+          {renderDiffSection("Sessions", diffResult.sessions, sessionBrief)}
+          {renderDiffSection("Commits", diffResult.commits, commitBrief)}
+          {renderSettingsDiff()}
+          {renderUiDiff()}
+
+          {/* Version history link */}
+          {versions.length > 0 && (
+            <div className="mt-4 text-center">
+              <button onClick={() => setShowVersions(!showVersions)}
+                className="text-xs text-stone-400 hover:text-stone-200 transition-colors">
+                {showVersions ? "Hide" : "Show"} Version History ({versions.length})
+              </button>
+              {showVersions && renderVersionHistory()}
+            </div>
+          )}
+
+          {/* Strategy selection */}
+          <div className="mt-5 space-y-3">
+            <h4 className="text-sm font-medium text-stone-300">Choose Strategy</h4>
+            <div className="grid grid-cols-3 gap-3">
+              <button onClick={() => selectStrategy("push")}
+                className={`p-4 rounded-lg border text-left transition-colors ${
+                  strategy === "push" ? "border-emerald-500 bg-emerald-500/10" : "border-stone-700 bg-stone-800/50 hover:bg-stone-800"
+                }`}>
+                <div className="text-sm font-medium text-stone-200 mb-1">Push</div>
+                <div className="text-[11px] text-stone-400">Browser → Disk</div>
+                <div className="text-[10px] text-rose-400/70 mt-2">
+                  {diffResult.sessions.serverOnly.length + diffResult.commits.serverOnly.length > 0
+                    ? `⚠ Loses ${diffResult.sessions.serverOnly.length + diffResult.commits.serverOnly.length} disk-only items`
+                    : "No disk-only data to lose"}
+                </div>
+              </button>
+              <button onClick={() => selectStrategy("pull")}
+                className={`p-4 rounded-lg border text-left transition-colors ${
+                  strategy === "pull" ? "border-blue-500 bg-blue-500/10" : "border-stone-700 bg-stone-800/50 hover:bg-stone-800"
+                }`}>
+                <div className="text-sm font-medium text-stone-200 mb-1">Pull</div>
+                <div className="text-[11px] text-stone-400">Disk → Browser</div>
+                <div className="text-[10px] text-rose-400/70 mt-2">
+                  {diffResult.sessions.localOnly.length + diffResult.commits.localOnly.length > 0
+                    ? `⚠ Loses ${diffResult.sessions.localOnly.length + diffResult.commits.localOnly.length} browser-only items`
+                    : "No browser-only data to lose"}
+                </div>
+              </button>
+              <button onClick={() => selectStrategy("merge")}
+                className={`p-4 rounded-lg border text-left transition-colors ${
+                  strategy === "merge" ? "border-amber-500 bg-amber-500/10" : "border-stone-700 bg-stone-800/50 hover:bg-stone-800"
+                }`}>
+                <div className="text-sm font-medium text-stone-200 mb-1">Merge</div>
+                <div className="text-[11px] text-stone-400">Keep both sides</div>
+                <div className="text-[10px] text-amber-400/70 mt-2">
+                  {diffResult.summary.conflictCount > 0
+                    ? `${diffResult.summary.conflictCount} conflict(s) to resolve`
+                    : "No conflicts — clean merge"}
+                </div>
+              </button>
+            </div>
+          </div>
+        </motion.div>
+      </div>
+    );
+  }
+
+  // ─── RENDER: Diff section helper ───
+  function renderDiffSection(title, section, briefFn) {
+    const key = title.toLowerCase();
+    const isExpanded = expandedSections[key];
+    const hasDiffs = section.localOnly.length > 0 || section.serverOnly.length > 0 || section.conflicts.length > 0;
+
+    return (
+      <div className="border-t border-stone-800 pt-3">
+        <button onClick={() => toggleSection(key)}
+          className="w-full flex items-center justify-between text-sm text-stone-300 hover:text-white transition-colors">
+          <span className="flex items-center gap-2">
+            {title}
+            <Badge color="green">{section.localOnly.length} browser</Badge>
+            <Badge color="blue">{section.serverOnly.length} disk</Badge>
+            {section.conflicts.length > 0 && <Badge color="amber">{section.conflicts.length} conflicts</Badge>}
+            {!hasDiffs && <Badge>match</Badge>}
+          </span>
+          <span className="text-stone-500">{isExpanded ? "▾" : "▸"}</span>
+        </button>
+        {isExpanded && (
+          <div className="mt-2 space-y-1.5 text-xs">
+            {section.localOnly.map((item, i) => (
+              <div key={`lo-${i}`} className="px-3 py-1.5 bg-emerald-500/10 border border-emerald-500/20 rounded-lg text-emerald-300">
+                <span className="text-emerald-500/70 mr-2">browser:</span>{briefFn(item)}
+              </div>
+            ))}
+            {section.serverOnly.map((item, i) => (
+              <div key={`so-${i}`} className="px-3 py-1.5 bg-blue-500/10 border border-blue-500/20 rounded-lg text-blue-300">
+                <span className="text-blue-500/70 mr-2">disk:</span>{briefFn(item)}
+              </div>
+            ))}
+            {section.conflicts.map((c, i) => (
+              <div key={`cf-${i}`} className="px-3 py-1.5 bg-amber-500/10 border border-amber-500/20 rounded-lg text-amber-300">
+                <span className="text-amber-500/70 mr-2">conflict:</span>
+                <span className="text-stone-400">{briefFn(c.local)}</span>
+                <span className="text-stone-600 ml-2">({c.fields.length} field{c.fields.length !== 1 ? "s" : ""} differ)</span>
+              </div>
+            ))}
+            {!hasDiffs && <p className="text-stone-500 px-3 py-1">All {title.toLowerCase()} match.</p>}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // ─── RENDER: Settings diff ───
+  function renderSettingsDiff() {
+    const isExpanded = expandedSections.settings;
+    return (
+      <div className="border-t border-stone-800 pt-3">
+        <button onClick={() => toggleSection("settings")}
+          className="w-full flex items-center justify-between text-sm text-stone-300 hover:text-white transition-colors">
+          <span className="flex items-center gap-2">
+            Settings
+            {diffResult.settings.conflicts.length > 0
+              ? <Badge color="amber">{diffResult.settings.conflicts.length} field(s) differ</Badge>
+              : <Badge>match</Badge>}
+          </span>
+          <span className="text-stone-500">{isExpanded ? "▾" : "▸"}</span>
+        </button>
+        {isExpanded && (
+          <div className="mt-2 space-y-1.5 text-xs">
+            {diffResult.settings.conflicts.map((c, i) => (
+              <div key={i} className="px-3 py-1.5 bg-amber-500/10 border border-amber-500/20 rounded-lg text-amber-300">
+                <span className="font-medium">{c.key}</span>
+                <span className="text-stone-500 mx-2">:</span>
+                <span className="text-emerald-400">{JSON.stringify(c.localValue)}</span>
+                <span className="text-stone-600 mx-1">vs</span>
+                <span className="text-blue-400">{JSON.stringify(c.serverValue)}</span>
+              </div>
+            ))}
+            {diffResult.settings.identical && <p className="text-stone-500 px-3 py-1">All settings match.</p>}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // ─── RENDER: UI diff ───
+  function renderUiDiff() {
+    const isExpanded = expandedSections.ui;
+    return (
+      <div className="border-t border-stone-800 pt-3">
+        <button onClick={() => toggleSection("ui")}
+          className="w-full flex items-center justify-between text-sm text-stone-300 hover:text-white transition-colors">
+          <span className="flex items-center gap-2">
+            UI Preferences
+            {diffResult.ui.conflicts.length > 0
+              ? <Badge color="amber">{diffResult.ui.conflicts.length} field(s) differ</Badge>
+              : <Badge>match</Badge>}
+          </span>
+          <span className="text-stone-500">{isExpanded ? "▾" : "▸"}</span>
+        </button>
+        {isExpanded && (
+          <div className="mt-2 space-y-1.5 text-xs">
+            {diffResult.ui.conflicts.map((c, i) => (
+              <div key={i} className="px-3 py-1.5 bg-amber-500/10 border border-amber-500/20 rounded-lg text-amber-300">
+                <span className="font-medium">{c.key}</span>
+                <span className="text-stone-500 mx-2">:</span>
+                <span className="text-emerald-400">{JSON.stringify(c.localValue)}</span>
+                <span className="text-stone-600 mx-1">vs</span>
+                <span className="text-blue-400">{JSON.stringify(c.serverValue)}</span>
+              </div>
+            ))}
+            {diffResult.ui.identical && <p className="text-stone-500 px-3 py-1">All preferences match.</p>}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // ─── RENDER: Conflict Resolver ───
+  if (phase === "conflicts") {
+    const hasSessionConflicts = diffResult.sessions.conflicts.length > 0;
+    const hasCommitConflicts = diffResult.commits.conflicts.length > 0;
+    const hasSettingsConflicts = diffResult.settings.conflicts.length > 0;
+    const hasUiConflicts = diffResult.ui.conflicts.length > 0;
+
+    return (
+      <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={onClose}>
+        <motion.div initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }}
+          onClick={(e) => e.stopPropagation()}
+          className="bg-stone-900 border border-stone-800 rounded-2xl p-6 w-full max-w-2xl max-h-[85vh] overflow-y-auto">
+          {renderHeader("Resolve Conflicts")}
+
+          {/* Bulk actions */}
+          <div className="flex gap-2 mb-4">
+            <button onClick={() => { resolveAll("sessions", "local"); resolveAll("commits", "local"); }}
+              className="text-xs px-3 py-1.5 rounded-lg bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30 transition-colors">
+              Keep All Local
+            </button>
+            <button onClick={() => { resolveAll("sessions", "server"); resolveAll("commits", "server"); }}
+              className="text-xs px-3 py-1.5 rounded-lg bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 transition-colors">
+              Keep All Server
+            </button>
+          </div>
+
+          {/* Session conflicts */}
+          {hasSessionConflicts && (
+            <div className="mb-4">
+              <h4 className="text-sm font-medium text-stone-300 mb-2">
+                Sessions ({diffResult.sessions.conflicts.length})
+              </h4>
+              <div className="space-y-2">
+                {diffResult.sessions.conflicts.map((c) => (
+                  <div key={c.id} className="bg-stone-800 rounded-lg p-3">
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-xs text-stone-400">{sessionBrief(c.local)}</span>
+                      <div className="flex gap-1">
+                        <button onClick={() => setResolution("sessions", c.id, "local")}
+                          className={`text-[11px] px-2 py-1 rounded ${
+                            (resolutions.sessions || {})[c.id] === "local"
+                              ? "bg-emerald-500/30 text-emerald-300" : "bg-stone-700 text-stone-400 hover:bg-stone-600"
+                          }`}>Local</button>
+                        <button onClick={() => setResolution("sessions", c.id, "server")}
+                          className={`text-[11px] px-2 py-1 rounded ${
+                            (resolutions.sessions || {})[c.id] === "server"
+                              ? "bg-blue-500/30 text-blue-300" : "bg-stone-700 text-stone-400 hover:bg-stone-600"
+                          }`}>Server</button>
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2 text-[11px]">
+                      <div className="bg-stone-900 rounded p-2">
+                        <span className="text-emerald-500">Local: </span>
+                        <span className="text-stone-400">{c.fields.map((f) => f.key).join(", ")}</span>
+                      </div>
+                      <div className="bg-stone-900 rounded p-2">
+                        <span className="text-blue-500">Server: </span>
+                        <span className="text-stone-400">{c.fields.map((f) => f.key).join(", ")}</span>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Commit conflicts */}
+          {hasCommitConflicts && (
+            <div className="mb-4">
+              <h4 className="text-sm font-medium text-stone-300 mb-2">
+                Commits ({diffResult.commits.conflicts.length})
+              </h4>
+              <div className="space-y-2">
+                {diffResult.commits.conflicts.map((c) => (
+                  <div key={c.id} className="bg-stone-800 rounded-lg p-3 flex items-center justify-between">
+                    <span className="text-xs text-stone-400">{commitBrief(c.local)}</span>
+                    <div className="flex gap-1">
+                      <button onClick={() => setResolution("commits", c.id, "local")}
+                        className={`text-[11px] px-2 py-1 rounded ${
+                          (resolutions.commits || {})[c.id] === "local"
+                            ? "bg-emerald-500/30 text-emerald-300" : "bg-stone-700 text-stone-400 hover:bg-stone-600"
+                        }`}>Local</button>
+                      <button onClick={() => setResolution("commits", c.id, "server")}
+                        className={`text-[11px] px-2 py-1 rounded ${
+                          (resolutions.commits || {})[c.id] === "server"
+                            ? "bg-blue-500/30 text-blue-300" : "bg-stone-700 text-stone-400 hover:bg-stone-600"
+                        }`}>Server</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Settings conflicts */}
+          {hasSettingsConflicts && (
+            <div className="mb-4">
+              <h4 className="text-sm font-medium text-stone-300 mb-2">Settings</h4>
+              <div className="space-y-2">
+                {diffResult.settings.conflicts.map((c) => (
+                  <div key={c.key} className="bg-stone-800 rounded-lg p-3 flex items-center justify-between">
+                    <span className="text-xs text-stone-400">
+                      <span className="font-medium text-stone-300">{c.key}</span>:{" "}
+                      <span className="text-emerald-400">{JSON.stringify(c.localValue)}</span>
+                      <span className="text-stone-600 mx-1">→</span>
+                      <span className="text-blue-400">{JSON.stringify(c.serverValue)}</span>
+                    </span>
+                    <div className="flex gap-1">
+                      <button onClick={() => setResolution("settings", c.key, "local")}
+                        className={`text-[11px] px-2 py-1 rounded ${
+                          (resolutions.settings || {})[c.key] === "local"
+                            ? "bg-emerald-500/30 text-emerald-300" : "bg-stone-700 text-stone-400 hover:bg-stone-600"
+                        }`}>Local</button>
+                      <button onClick={() => setResolution("settings", c.key, "server")}
+                        className={`text-[11px] px-2 py-1 rounded ${
+                          (resolutions.settings || {})[c.key] === "server"
+                            ? "bg-blue-500/30 text-blue-300" : "bg-stone-700 text-stone-400 hover:bg-stone-600"
+                        }`}>Server</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* UI conflicts */}
+          {hasUiConflicts && (
+            <div className="mb-4">
+              <h4 className="text-sm font-medium text-stone-300 mb-2">UI Preferences</h4>
+              <div className="space-y-2">
+                {diffResult.ui.conflicts.map((c) => (
+                  <div key={c.key} className="bg-stone-800 rounded-lg p-3 flex items-center justify-between">
+                    <span className="text-xs text-stone-400">
+                      <span className="font-medium text-stone-300">{c.key}</span>:{" "}
+                      <span className="text-emerald-400">{JSON.stringify(c.localValue)}</span>
+                      <span className="text-stone-600 mx-1">→</span>
+                      <span className="text-blue-400">{JSON.stringify(c.serverValue)}</span>
+                    </span>
+                    <div className="flex gap-1">
+                      <button onClick={() => setResolution("ui", c.key, "local")}
+                        className={`text-[11px] px-2 py-1 rounded ${
+                          (resolutions.ui || {})[c.key] === "local"
+                            ? "bg-emerald-500/30 text-emerald-300" : "bg-stone-700 text-stone-400 hover:bg-stone-600"
+                        }`}>Local</button>
+                      <button onClick={() => setResolution("ui", c.key, "server")}
+                        className={`text-[11px] px-2 py-1 rounded ${
+                          (resolutions.ui || {})[c.key] === "server"
+                            ? "bg-blue-500/30 text-blue-300" : "bg-stone-700 text-stone-400 hover:bg-stone-600"
+                        }`}>Server</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Continue button */}
+          <button onClick={() => goToDryRun("merge")}
+            className="w-full mt-4 py-2.5 rounded-lg bg-amber-500 hover:bg-amber-600 font-medium text-sm transition-colors">
+            Continue to Preview →
+          </button>
+        </motion.div>
+      </div>
+    );
+  }
+
+  // ─── RENDER: Dry Run ───
+  if (phase === "dryrun" && preview) {
+    return (
+      <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={onClose}>
+        <motion.div initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }}
+          onClick={(e) => e.stopPropagation()}
+          className="bg-stone-900 border border-stone-800 rounded-2xl p-6 w-full max-w-2xl max-h-[85vh] overflow-y-auto">
+          {renderHeader("Sync Preview")}
+
+          <div className="bg-stone-800 rounded-lg p-4 mb-4">
+            <div className="flex items-center gap-2 mb-3">
+              <Badge color={strategy === "push" ? "green" : strategy === "pull" ? "blue" : "amber"}>
+                {strategy.toUpperCase()}
+              </Badge>
+              <span className="text-sm text-stone-300">
+                {strategy === "push" ? "Browser → Disk" : strategy === "pull" ? "Disk → Browser" : "Merge both sides"}
+              </span>
+            </div>
+            <div className="space-y-1.5">
+              {preview.description.map((line, i) => (
+                <p key={i} className={`text-sm ${
+                  line.startsWith("⚠") ? "text-rose-400" :
+                  line.startsWith("✓") ? "text-emerald-400" :
+                  "text-stone-400"
+                }`}>{line}</p>
+              ))}
+            </div>
+          </div>
+
+          <div className="bg-stone-800/50 rounded-lg p-3 mb-5">
+            <div className="grid grid-cols-2 gap-4 text-center">
+              <div>
+                <div className="text-lg font-bold text-stone-200">{preview.resultSummary.sessionsCount}</div>
+                <div className="text-[11px] text-stone-400">sessions after sync</div>
+              </div>
+              <div>
+                <div className="text-lg font-bold text-stone-200">{preview.resultSummary.commitsCount}</div>
+                <div className="text-[11px] text-stone-400">commits after sync</div>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex gap-3">
+            <button onClick={executeSync}
+              className="flex-1 py-2.5 rounded-lg bg-amber-500 hover:bg-amber-600 font-medium text-sm transition-colors">
+              Create Backup & Sync
+            </button>
+            <button onClick={() => setPhase(strategy === "merge" && diffResult.summary.conflictCount > 0 ? "conflicts" : "summary")}
+              className="px-4 py-2.5 rounded-lg bg-stone-800 hover:bg-stone-700 text-sm transition-colors">
+              Back
+            </button>
+          </div>
+        </motion.div>
+      </div>
+    );
+  }
+
+  // ─── RENDER: Dryrun fallback (preview not ready) ───
+  if (phase === "dryrun" && !preview) {
+    return (
+      <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={onClose}>
+        <motion.div initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }}
+          onClick={(e) => e.stopPropagation()}
+          className="bg-stone-900 border border-stone-800 rounded-2xl p-6 w-full max-w-2xl">
+          {renderHeader("Sync Preview")}
+          <p className="text-stone-400 text-sm mb-4">Something went wrong generating the preview.</p>
+          <button onClick={() => setPhase("summary")}
+            className="px-4 py-2 rounded-lg bg-stone-800 hover:bg-stone-700 text-sm transition-colors">
+            Back to Summary
+          </button>
+        </motion.div>
+      </div>
+    );
+  }
+
+  // ─── RENDER: Executing ───
+  if (phase === "executing") {
+    return (
+      <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+        <motion.div initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }}
+          className="bg-stone-900 border border-stone-800 rounded-2xl p-6 w-full max-w-2xl">
+          {renderHeader("Syncing…", true)}
+          <div className="flex items-center justify-center py-12 gap-3 text-stone-400">
+            <Icon path={ICONS.refresh} size={20} className="animate-spin" />
+            <span>Creating backup and applying changes…</span>
+          </div>
+        </motion.div>
+      </div>
+    );
+  }
+
+  // ─── RENDER: Done ───
+  if (phase === "done") {
+    return (
+      <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={onClose}>
+        <motion.div initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }}
+          onClick={(e) => e.stopPropagation()}
+          className="bg-stone-900 border border-stone-800 rounded-2xl p-6 w-full max-w-2xl max-h-[85vh] overflow-y-auto">
+          {renderHeader("Sync Complete")}
+          <div className="text-center py-6">
+            <div className="text-emerald-400 text-4xl mb-3">✓</div>
+            <p className="text-stone-300 mb-2">Data synced successfully!</p>
+            <p className="text-stone-500 text-sm mb-4">
+              A backup was saved as "pre-sync-{strategy}". You can restore it from version history.
+            </p>
+            {preview && (
+              <div className="bg-stone-800 rounded-lg p-3 mb-6 text-left">
+                <p className="text-sm text-stone-400 mb-1">
+                  Result: {preview.resultSummary.sessionsCount} sessions, {preview.resultSummary.commitsCount} commits
+                </p>
+                {preview.description.map((line, i) => (
+                  <p key={i} className="text-xs text-stone-500">{line}</p>
+                ))}
+              </div>
+            )}
+            {versions.length > 0 && (
+              <button onClick={() => setShowVersions(true)}
+                className="text-xs text-stone-400 hover:text-stone-200 transition-colors mb-4 block mx-auto">
+                View Version History ({versions.length})
+              </button>
+            )}
+            {showVersions && renderVersionHistory()}
+            <div>
+              <button onClick={onClose}
+                className="px-6 py-2.5 rounded-lg bg-amber-500 hover:bg-amber-600 font-medium text-sm transition-colors">
+                Done
+              </button>
+            </div>
+          </div>
+        </motion.div>
+      </div>
+    );
+  }
+
+  return null;
 }
