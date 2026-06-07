@@ -2400,20 +2400,24 @@ function SessionsView({ data, deleteSession, updateSession, initialFilter, onFil
                     </div>
 
                     {/* ── Collapsible checkpoints section ── */}
-                    {(s.checkpoints || []).length > 0 && (
-                      <div className="mt-3 pt-3 border-t border-stone-800/60">
-                        <button
-                          onClick={() => toggleSessionCpExpand(s.id)}
-                          className="flex items-center gap-1.5 text-xs text-stone-400 hover:text-stone-300"
-                        >
-                          <Icon path={expandedSessionCps.has(s.id) ? ICONS.chevronDown : ICONS.chevronRight} size={12} />
-                          <Icon path={ICONS.flag} size={12} className="text-amber-500/60" />
-                          {(s.checkpoints || []).length} checkpoint{(s.checkpoints || []).length !== 1 ? "s" : ""}
-                        </button>
+                    <div className="mt-3 pt-3 border-t border-stone-800/60">
+                      <button
+                        onClick={() => toggleSessionCpExpand(s.id)}
+                        className="flex items-center gap-1.5 text-xs text-stone-400 hover:text-stone-300"
+                      >
+                        <Icon path={expandedSessionCps.has(s.id) ? ICONS.chevronDown : ICONS.chevronRight} size={12} />
+                        <Icon path={ICONS.flag} size={12} className="text-amber-500/60" />
+                        {(s.checkpoints || []).length > 0
+                          ? `${(s.checkpoints || []).length} checkpoint${(s.checkpoints || []).length !== 1 ? "s" : ""}`
+                          : "No checkpoints — add"}
+                      </button>
 
-                        {expandedSessionCps.has(s.id) && (
-                          <div className="mt-2 ml-5 space-y-1.5">
-                            {(s.checkpoints || []).map((cp) => (
+                      {expandedSessionCps.has(s.id) && (
+                        <div className="mt-2 ml-5 space-y-1.5">
+                          {(s.checkpoints || []).length === 0 && (
+                            <p className="text-xs text-stone-600 py-1">No checkpoints yet</p>
+                          )}
+                          {(s.checkpoints || []).map((cp) => (
                               <div key={cp.id} className="group flex items-start gap-2 py-1">
                                 <span className="mt-1.5 w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0" />
                                 {editingCp && editingCp.cpId === cp.id ? (
@@ -2501,7 +2505,6 @@ function SessionsView({ data, deleteSession, updateSession, initialFilter, onFil
                           </div>
                         )}
                       </div>
-                    )}
                   </motion.div>
                 ))}
               </div>
