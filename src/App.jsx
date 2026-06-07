@@ -374,49 +374,76 @@ const DEFAULT_DATA = {
       autoDetected: null,
     },
   },
+  ui: {
+    view: "dashboard",
+    sessionsFilter: "all",
+    gitRepoFilter: "all",
+    analyticsRange: "week",
+    exportPeriod: "week",
+    exportFormat: "xlsx",
+  },
 };
+
+// --- Shared data helpers ---
+function validateDataShape(parsed) {
+  return (
+    parsed &&
+    Array.isArray(parsed.sessions) &&
+    Array.isArray(parsed.commits) &&
+    parsed.settings &&
+    typeof parsed.settings === "object"
+  );
+}
+
+function migrate(parsed) {
+  if ("githubToken" in parsed.settings || "githubUser" in parsed.settings) {
+    delete parsed.settings.githubToken;
+    delete parsed.settings.githubUser;
+    if (!parsed.settings.trackedRepos) {
+      parsed.settings.trackedRepos = [];
+    }
+  }
+  if (!parsed.settings.trackedRepos) {
+    parsed.settings.trackedRepos = [];
+  }
+  if ("idleMinutes" in parsed.settings) {
+    delete parsed.settings.idleMinutes;
+  }
+  parsed.sessions = parsed.sessions.map((s) => ({
+    ...s,
+    pauses: s.pauses || [],
+  }));
+  parsed.commits = parsed.commits.map((c) => ({
+    ...c,
+    source: c.source || "manual",
+    repoPath: c.repoPath || "",
+  }));
+  // Add UI preferences (spread merge ensures forward compatibility with new fields)
+  parsed.ui = { ...DEFAULT_DATA.ui, ...(parsed.ui || {}) };
+  return parsed;
+}
 
 const load = () => {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw);
-    if (
-      !parsed ||
-      !Array.isArray(parsed.sessions) ||
-      !Array.isArray(parsed.commits) ||
-      !parsed.settings ||
-      typeof parsed.settings !== "object"
-    ) {
-      return null;
-    }
-    // Migration: remove GitHub fields, add trackedRepos
-    if ("githubToken" in parsed.settings || "githubUser" in parsed.settings) {
-      delete parsed.settings.githubToken;
-      delete parsed.settings.githubUser;
-      if (!parsed.settings.trackedRepos) {
-        parsed.settings.trackedRepos = [];
-      }
-    }
-    if (!parsed.settings.trackedRepos) {
-      parsed.settings.trackedRepos = [];
-    }
-    // Migration: remove idle detection setting
-    if ("idleMinutes" in parsed.settings) {
-      delete parsed.settings.idleMinutes;
-    }
-    // Migration: add pauses array to old sessions
-    parsed.sessions = parsed.sessions.map((s) => ({
-      ...s,
-      pauses: s.pauses || [],
-    }));
-    // Tag old commits as manual source
-    parsed.commits = parsed.commits.map((c) => ({
-      ...c,
-      source: c.source || "manual",
-      repoPath: c.repoPath || "",
-    }));
-    return parsed;
+    if (!validateDataShape(parsed)) return null;
+    return migrate(parsed);
+  } catch {
+    return null;
+  }
+};
+
+const loadFromServer = async () => {
+  try {
+    const res = await fetch("/api/data");
+    if (!res.ok) return null;
+    const result = await res.json();
+    if (!result.exists || !result.data) return null;
+    const parsed = result.data;
+    if (!validateDataShape(parsed)) return null;
+    return migrate(parsed);
   } catch {
     return null;
   }
@@ -435,22 +462,30 @@ const save = (data) => {
       throw e;
     }
   }
+  // Fire-and-forget save to server (durable backup)
+  fetch("/api/data", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ data }),
+  }).catch(() => {
+    console.warn("DevTrack: server backup unavailable — data saved to localStorage only");
+  });
 };
 
 export default function App() {
-  const [data, setData] = useState(() => load() || DEFAULT_DATA);
+  // Load once and derive all initial state from it
+  const [initialData] = useState(() => load());
+  const [data, setData] = useState(() => initialData || DEFAULT_DATA);
   const [now] = useState(() => Date.now());
-  const [view, setView] = useState("dashboard");
+  const [view, setView] = useState(() => initialData?.ui?.view || "dashboard");
   const [activeSession, setActiveSession] = useState(() => {
-    const d = load();
-    return (d?.sessions || []).find((s) => s.status === "running" || s.status === "paused") || null;
+    const running = (initialData?.sessions || []).find((s) => s.status === "running" || s.status === "paused");
+    return running || null;
   });
   const [elapsed, setElapsed] = useState(() => {
-    const d = load();
-    const active = (d?.sessions || []).find((s) => s.status === "running" || s.status === "paused");
+    const active = (initialData?.sessions || []).find((s) => s.status === "running" || s.status === "paused");
     if (!active) return 0;
     if (active.status === "paused") {
-      // Compute break elapsed for paused session
       const currentPause = (active.pauses || []).find((p) => p.end === null);
       return currentPause ? Date.now() - currentPause.start : 0;
     }
@@ -468,6 +503,43 @@ export default function App() {
       if (saveTimer.current) clearTimeout(saveTimer.current);
     };
   }, [data]);
+
+  // Persist UI preferences alongside data (piggybacks on existing debounce + server save)
+  const updateUi = (updates) => {
+    setData((d) => ({ ...d, ui: { ...d.ui, ...updates } }));
+  };
+
+  // Wrapper that updates both local view state and persisted ui.view
+  const changeView = (v) => {
+    setView(v);
+    setData((d) => ({ ...d, ui: { ...d.ui, view: v } }));
+  };
+
+  // Sync from server on mount — only apply if user hasn't changed data during the async gap.
+  // The ref guards against React 18 Strict Mode's double-mount in development.
+  const serverSynced = useRef(false);
+  const dataRef = useRef(data);
+  useEffect(() => { dataRef.current = data; }, [data]);
+  useEffect(() => {
+    if (serverSynced.current) return;
+    serverSynced.current = true;
+    const mountHash = JSON.stringify(data);
+
+    loadFromServer().then((serverData) => {
+      if (!serverData) return;
+      if (JSON.stringify(dataRef.current) !== mountHash) return;
+
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(serverData));
+      setData(serverData);
+      setView(serverData.ui?.view || "dashboard");
+      const running = serverData.sessions.find((s) => s.status === "running" || s.status === "paused") || null;
+      if (running) {
+        setActiveSession(running);
+        setElapsed(Date.now() - running.start);
+      }
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Timer tick — update every second while session is active (running or paused)
   useEffect(() => {
@@ -616,6 +688,15 @@ export default function App() {
 
   const addCommit = (commit) => {
     setData((d) => ({ ...d, commits: [commit, ...d.commits] }));
+  };
+
+  const handleReset = () => {
+    localStorage.removeItem(STORAGE_KEY);
+    setData(DEFAULT_DATA);
+    setView("dashboard");
+    setActiveSession(null);
+    setElapsed(0);
+    fetch("/api/data", { method: "DELETE" }).catch(() => {});
   };
 
   // Git-estimated session import
@@ -846,7 +927,7 @@ export default function App() {
                   <button
                     key={item.id}
                     onClick={() => {
-                      setView(item.id);
+                      changeView(item.id);
                       setMobileMenuOpen(false);
                     }}
                     className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-all ${
@@ -904,7 +985,7 @@ export default function App() {
           {nav.map((item) => (
             <button
               key={item.id}
-              onClick={() => setView(item.id)}
+              onClick={() => changeView(item.id)}
               className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-all ${
                 view === item.id
                   ? "bg-gradient-to-r from-amber-500/20 to-orange-500/10 text-white border border-amber-500/30"
@@ -930,7 +1011,7 @@ export default function App() {
               {formatDuration(elapsed)}
             </div>
             <button
-              onClick={() => setView("timer")}
+              onClick={() => changeView("timer")}
               className={`text-xs mt-1 ${activeSession.status === "paused" ? "text-sky-400 hover:text-sky-300" : "text-emerald-400 hover:text-emerald-300"}`}
             >
               View →
@@ -966,7 +1047,7 @@ export default function App() {
                 startSession={startSession}
                 pauseSession={pauseSession}
                 resumeSession={resumeSession}
-                setView={setView}
+                setView={changeView}
                 gitEstimatedToday={gitEstimatedToday}
                 gitEstimatedSessions={gitEstimatedSessions}
               />
@@ -990,6 +1071,8 @@ export default function App() {
                 data={data}
                 deleteSession={deleteSession}
                 updateSession={updateSession}
+                initialFilter={data.ui?.sessionsFilter || "all"}
+                onFilterChange={(f) => updateUi({ sessionsFilter: f })}
               />
             )}
             {view === "git" && (
@@ -1001,13 +1084,28 @@ export default function App() {
                 importEstimatedSession={importEstimatedSession}
                 importAllEstimated={importAllEstimated}
                 isImported={isImported}
+                initialRepoFilter={data.ui?.gitRepoFilter || "all"}
+                onFilterChange={(r) => updateUi({ gitRepoFilter: r })}
               />
             )}
             {view === "analytics" && (
-              <AnalyticsView data={data} weeklyData={weeklyData} gitEstimatedSessions={gitEstimatedSessions} />
+              <AnalyticsView
+                data={data}
+                weeklyData={weeklyData}
+                gitEstimatedSessions={gitEstimatedSessions}
+                initialRange={data.ui?.analyticsRange || "week"}
+                onRangeChange={(r) => updateUi({ analyticsRange: r })}
+              />
             )}
             {view === "export" && (
-              <ExportView data={data} gitAuthors={data.settings.gitAuthors} showToast={showToast} />
+              <ExportView
+                data={data}
+                gitAuthors={data.settings.gitAuthors}
+                showToast={showToast}
+                initialPeriod={data.ui?.exportPeriod || "week"}
+                initialFormat={data.ui?.exportFormat || "xlsx"}
+                onPrefsChange={({ period, format }) => updateUi({ exportPeriod: period, exportFormat: format })}
+              />
             )}
           </motion.div>
         </AnimatePresence>
@@ -1019,8 +1117,8 @@ export default function App() {
         onClose={() => setSettingsOpen(false)}
         data={data}
         updateSettings={updateSettings}
-        setData={setData}
         showToast={showToast}
+        onReset={handleReset}
       />
       <Toast toast={toast} />
     </div>
@@ -1643,8 +1741,8 @@ function TimerView({
 }
 
 // ============ SESSIONS VIEW ============
-function SessionsView({ data, deleteSession, updateSession }) {
-  const [filter, setFilter] = useState("all");
+function SessionsView({ data, deleteSession, updateSession, initialFilter, onFilterChange }) {
+  const [filter, setFilter] = useState(initialFilter || "all");
   const [search, setSearch] = useState("");
   const [editingId, setEditingId] = useState(null);
   const [editData, setEditData] = useState({});
@@ -1689,7 +1787,7 @@ function SessionsView({ data, deleteSession, updateSession }) {
           {["all", "work"].map((f) => (
             <button
               key={f}
-              onClick={() => setFilter(f)}
+              onClick={() => { setFilter(f); onFilterChange?.(f); }}
               className={`px-4 py-1.5 rounded-lg text-sm capitalize ${filter === f ? "bg-amber-500 text-white" : "text-stone-400"}`}
             >
               {f}
@@ -1887,13 +1985,13 @@ function SessionsView({ data, deleteSession, updateSession }) {
 }
 
 // ============ GIT VIEW ============
-function GitView({ data, addCommit, setData, showToast, importEstimatedSession, importAllEstimated, isImported }) {
+function GitView({ data, addCommit, setData, showToast, importEstimatedSession, importAllEstimated, isImported, initialRepoFilter, onFilterChange }) {
   const [repoPath, setRepoPath] = useState("");
   const [validating, setValidating] = useState(false);
   const [repoError, setRepoError] = useState("");
   const [syncingRepoId, setSyncingRepoId] = useState(null);
   const [serverStatus, setServerStatus] = useState(null); // "online" | "offline" | "no-git"
-  const [repoFilter, setRepoFilter] = useState("all");
+  const [repoFilter, setRepoFilter] = useState(initialRepoFilter || "all");
   const [manualCommit, setManualCommit] = useState({
     sha: "",
     message: "",
@@ -2301,7 +2399,7 @@ function GitView({ data, addCommit, setData, showToast, importEstimatedSession, 
           {repoNames.length > 1 && (
             <select
               value={repoFilter}
-              onChange={(e) => setRepoFilter(e.target.value)}
+              onChange={(e) => { setRepoFilter(e.target.value); onFilterChange?.(e.target.value); }}
               className="px-3 py-1.5 bg-stone-800 border border-stone-700 rounded-lg text-sm focus:outline-none focus:border-amber-500"
             >
               <option value="all">All repos</option>
@@ -2484,8 +2582,8 @@ function GitView({ data, addCommit, setData, showToast, importEstimatedSession, 
 }
 
 // ============ ANALYTICS VIEW ============
-function AnalyticsView({ data, gitEstimatedSessions }) {
-  const [range, setRange] = useState("week");
+function AnalyticsView({ data, gitEstimatedSessions, initialRange, onRangeChange }) {
+  const [range, setRange] = useState(initialRange || "week");
   const [now] = useState(() => Date.now());
 
   const rangeData = useMemo(() => {
@@ -2607,7 +2705,7 @@ function AnalyticsView({ data, gitEstimatedSessions }) {
           {["week", "month", "year"].map((r) => (
             <button
               key={r}
-              onClick={() => setRange(r)}
+              onClick={() => { setRange(r); onRangeChange?.(r); }}
               className={`px-4 py-1.5 rounded-lg text-sm capitalize ${range === r ? "bg-amber-500 text-white" : "text-stone-400"}`}
             >
               {r}
@@ -2753,9 +2851,9 @@ function AnalyticsView({ data, gitEstimatedSessions }) {
 }
 
 // ============ EXPORT VIEW ============
-function ExportView({ data, gitAuthors, showToast }) {
-  const [period, setPeriod] = useState("week");
-  const [format, setFormat] = useState("xlsx");
+function ExportView({ data, gitAuthors, showToast, initialPeriod, initialFormat, onPrefsChange }) {
+  const [period, setPeriod] = useState(initialPeriod || "week");
+  const [format, setFormat] = useState(initialFormat || "xlsx");
   const preview = useMemo(() => getExportPreview(data, period), [data, period]);
 
   const handleExport = () => {
@@ -2822,7 +2920,7 @@ function ExportView({ data, gitAuthors, showToast }) {
               {["day", "week", "month", "year"].map((p) => (
                 <button
                   key={p}
-                  onClick={() => setPeriod(p)}
+                  onClick={() => { setPeriod(p); onPrefsChange?.({ period: p, format }); }}
                   className={`py-3 rounded-xl text-sm capitalize font-medium ${period === p ? "bg-amber-500 text-white" : "bg-stone-800 text-stone-400 hover:bg-stone-700"}`}
                 >
                   {p}
@@ -2837,7 +2935,7 @@ function ExportView({ data, gitAuthors, showToast }) {
             </label>
             <div className="grid grid-cols-2 gap-2 mt-2">
               <button
-                onClick={() => setFormat("xlsx")}
+                onClick={() => { setFormat("xlsx"); onPrefsChange?.({ period, format: "xlsx" }); }}
                 className={`py-3 rounded-xl text-sm font-medium ${format === "xlsx" ? "bg-emerald-500 text-white" : "bg-stone-800 text-stone-400"}`}
               >
                 <span className="flex items-center justify-center gap-2">
@@ -2845,7 +2943,7 @@ function ExportView({ data, gitAuthors, showToast }) {
                 </span>
               </button>
               <button
-                onClick={() => setFormat("csv")}
+                onClick={() => { setFormat("csv"); onPrefsChange?.({ period, format: "csv" }); }}
                 className={`py-3 rounded-xl text-sm font-medium ${format === "csv" ? "bg-emerald-500 text-white" : "bg-stone-800 text-stone-400"}`}
               >
                 <span className="flex items-center justify-center gap-2">
@@ -2935,7 +3033,7 @@ function ExportView({ data, gitAuthors, showToast }) {
 }
 
 // ============ SETTINGS MODAL ============
-function SettingsModal({ open, onClose, data, updateSettings, setData, showToast }) {
+function SettingsModal({ open, onClose, data, updateSettings, showToast, onReset }) {
   const [form, setForm] = useState(data.settings);
   const [newIdentityName, setNewIdentityName] = useState("");
   const [newIdentityEmail, setNewIdentityEmail] = useState("");
@@ -3139,8 +3237,7 @@ function SettingsModal({ open, onClose, data, updateSettings, setData, showToast
             <button
               onClick={() => {
                 if (confirm("Clear all data? This cannot be undone.")) {
-                  localStorage.removeItem(STORAGE_KEY);
-                  setData(DEFAULT_DATA);
+                  onReset();
                   onClose();
                 }
               }}

@@ -11,6 +11,10 @@ export default defineConfig({
         target: "http://localhost:9001",
         changeOrigin: true,
       },
+      "/api/data": {
+        target: "http://localhost:9001",
+        changeOrigin: true,
+      },
     },
   },
 });

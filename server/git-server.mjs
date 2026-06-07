@@ -1,13 +1,63 @@
 import express from "express";
 import { exec } from "child_process";
 import { promisify } from "util";
-import { basename, isAbsolute } from "path";
+import { basename, isAbsolute, dirname, join } from "path";
+import { fileURLToPath } from "url";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+  renameSync,
+  unlinkSync,
+} from "fs";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const DATA_DIR = join(__dirname, "data");
+const DATA_FILE = join(DATA_DIR, "devtrack.json");
+
+// Ensure data directory exists at startup
+if (!existsSync(DATA_DIR)) {
+  mkdirSync(DATA_DIR, { recursive: true });
+}
+
+// Clean up stale .tmp file from a previous crashed write
+const TMP_FILE = DATA_FILE + ".tmp";
+if (existsSync(TMP_FILE)) {
+  try { unlinkSync(TMP_FILE); } catch { /* ignore */ }
+}
 
 const run = promisify(exec);
 const app = express();
 const PORT = 9001;
 
-app.use(express.json());
+app.use(express.json({ limit: "2mb" }));
+
+// --- Data persistence helpers ---
+function readDataFile() {
+  try {
+    if (!existsSync(DATA_FILE)) return null;
+    const raw = readFileSync(DATA_FILE, "utf-8");
+    return JSON.parse(raw);
+  } catch (err) {
+    if (existsSync(DATA_FILE)) {
+      console.warn("DevTrack: data file is corrupt or unreadable, ignoring:", err.message);
+    }
+    return null;
+  }
+}
+
+function writeDataFile(data) {
+  const tmp = DATA_FILE + ".tmp";
+  try {
+    writeFileSync(tmp, JSON.stringify(data, null, 2), "utf-8");
+    renameSync(tmp, DATA_FILE);
+  } catch (err) {
+    try { if (existsSync(tmp)) unlinkSync(tmp); } catch { /* best effort */ }
+    throw err;
+  }
+}
 
 // --- Request logging ---
 app.use((req, res, next) => {
@@ -232,9 +282,63 @@ app.post("/api/git/user", async (req, res) => {
   }
 });
 
+// =====================================================
+// GET /api/data — load persisted app data
+// =====================================================
+app.get("/api/data", (_req, res) => {
+  const data = readDataFile();
+  if (data === null) {
+    return res.json({ exists: false });
+  }
+  res.json({ exists: true, data });
+});
+
+// =====================================================
+// POST /api/data — save app data to file
+// =====================================================
+app.post("/api/data", (req, res) => {
+  try {
+    const { data } = req.body;
+    if (!data || typeof data !== "object") {
+      return res.status(400).json({ error: "Missing 'data' in request body" });
+    }
+    if (
+      !Array.isArray(data.sessions) ||
+      !Array.isArray(data.commits) ||
+      !data.settings ||
+      typeof data.settings !== "object"
+    ) {
+      return res.status(400).json({ error: "Invalid data shape" });
+    }
+    if (data.sessions.length > 10000 || data.commits.length > 10000) {
+      return res.status(400).json({ error: "Data arrays exceed maximum length" });
+    }
+    writeDataFile(data);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("DevTrack: failed to write data file:", err.message);
+    res.status(500).json({ error: "Failed to save data" });
+  }
+});
+
+// =====================================================
+// DELETE /api/data — clear persisted app data
+// =====================================================
+app.delete("/api/data", (_req, res) => {
+  try {
+    if (existsSync(DATA_FILE)) {
+      unlinkSync(DATA_FILE);
+    }
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("DevTrack: failed to delete data file:", err.message);
+    res.status(500).json({ error: "Failed to clear data" });
+  }
+});
+
 // --- Start server ---
-app.listen(PORT, () => {
-  console.log(`DevTrack git server running on http://localhost:${PORT}`);
+app.listen(PORT, "127.0.0.1", () => {
+  console.log(`DevTrack git server running on http://127.0.0.1:${PORT}`);
 }).on("error", (err) => {
   if (err.code === "EADDRINUSE") {
     console.error(`Port ${PORT} is already in use. Is the git server already running?`);
