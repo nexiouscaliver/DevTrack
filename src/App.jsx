@@ -604,6 +604,34 @@ const save = (data) => {
   }
 };
 
+// --- Smart localStorage cache eviction ---
+// localStorage is a buffer, not the primary store. The server disk is source of truth.
+// This function trims completed sessions and commits older than 2 months from the data
+// object, but ONLY when the caller confirms the server has the full data.
+// Returns the same data object if nothing to trim (identity check for callers).
+const CACHE_WINDOW_MS = 60 * 24 * 60 * 60 * 1000; // 60 days
+
+function trimLocalStorage(data, serverConfirmed) {
+  if (!serverConfirmed || !data) return data;
+  const threshold = Date.now() - CACHE_WINDOW_MS;
+
+  const trimmedSessions = data.sessions.filter(
+    (s) => s.start >= threshold || s.status === "running" || s.status === "paused",
+  );
+  const trimmedCommits = data.commits.filter((c) => c.timestamp >= threshold);
+
+  const sessionsRemoved = data.sessions.length - trimmedSessions.length;
+  const commitsRemoved = data.commits.length - trimmedCommits.length;
+  if (sessionsRemoved + commitsRemoved === 0) return data; // nothing trimmed — return same ref
+
+  return {
+    ...data,
+    sessions: trimmedSessions,
+    commits: trimmedCommits,
+    _lastTrim: Date.now(), // metadata for debugging
+  };
+}
+
 export default function App() {
   // Load once and derive all initial state from it
   const [initialData] = useState(() => load());
@@ -653,6 +681,12 @@ export default function App() {
       if (serverStatusRef.current !== "connected") {
         serverStatusRef.current = "connected";
         setServerStatus("connected");
+      }
+      // Server confirmed write — trim old data from localStorage cache
+      const trimmed = trimLocalStorage(data, true);
+      if (trimmed !== data) {
+        try { localStorage.setItem(STORAGE_KEY, JSON.stringify(trimmed)); } catch {}
+        setData(trimmed);
       }
     }).catch(() => {
       if (attempt < 3) {
@@ -740,12 +774,23 @@ export default function App() {
     if (serverSynced.current) return;
     serverSynced.current = true;
 
-    // Health check — sets initial server status
+    // Health check — sets initial server status, then trims stale cache data
     fetch("/api/health")
       .then((r) => {
         if (!r.ok) throw new Error();
         serverStatusRef.current = "connected";
         setServerStatus("connected");
+        // Server is up — trim old data from localStorage cache
+        const trimmed = trimLocalStorage(dataRef.current, true);
+        if (trimmed !== dataRef.current) {
+          const sRemoved = dataRef.current.sessions.length - trimmed.sessions.length;
+          const cRemoved = dataRef.current.commits.length - trimmed.commits.length;
+          try { localStorage.setItem(STORAGE_KEY, JSON.stringify(trimmed)); } catch {}
+          setData(trimmed);
+          if (sRemoved + cRemoved > 0) {
+            showToast(`Cleaned up ${sRemoved} old session${sRemoved !== 1 ? "s" : ""} and ${cRemoved} commit${cRemoved !== 1 ? "s" : ""} from local cache`, "success");
+          }
+        }
       })
       .catch(() => {
         serverStatusRef.current = "disconnected";
@@ -800,6 +845,14 @@ export default function App() {
       }
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Fetch full data from server (for views that need historical data beyond the 2-month cache).
+  // Returns the server data if available, falls back to localStorage cache.
+  const fetchFullData = useCallback(async () => {
+    const serverData = await loadFromServer();
+    if (serverData) return serverData;
+    return dataRef.current;
   }, []);
 
   // Cross-tab conflict detection — listen for localStorage writes from other tabs
@@ -1602,6 +1655,7 @@ export default function App() {
                 gitEstimatedSessions={gitEstimatedSessions}
                 initialRange={data.ui?.analyticsRange || "week"}
                 onRangeChange={(r) => updateUi({ analyticsRange: r })}
+                fetchFullData={fetchFullData}
               />
             )}
             {view === "worklog" && (
@@ -1626,6 +1680,7 @@ export default function App() {
                 initialFormat={data.ui?.exportFormat || "xlsx"}
                 onPrefsChange={({ period, format }) => updateUi({ exportPeriod: period, exportFormat: format })}
                 updateUi={updateUi}
+                fetchFullData={fetchFullData}
               />
             )}
           </motion.div>
@@ -3462,9 +3517,28 @@ function GitView({ data, addCommit, setData, showToast, importEstimatedSession, 
 }
 
 // ============ ANALYTICS VIEW ============
-function AnalyticsView({ data, gitEstimatedSessions, initialRange, onRangeChange }) {
+function AnalyticsView({ data, gitEstimatedSessions, initialRange, onRangeChange, fetchFullData }) {
   const [range, setRange] = useState(initialRange || "week");
   const [now] = useState(() => Date.now());
+  const [fullData, setFullData] = useState(null);
+  const [loadingFull, setLoadingFull] = useState(false);
+
+  // When range is "year", fetch full historical data from server (beyond 2-month localStorage cache)
+  useEffect(() => {
+    if (range === "year" && fetchFullData && !fullData && !loadingFull) {
+      setLoadingFull(true);
+      fetchFullData().then((fd) => {
+        setFullData(fd);
+        setLoadingFull(false);
+      });
+    }
+    if (range !== "year") {
+      setFullData(null); // clear when switching back to smaller ranges
+    }
+  }, [range, fetchFullData, fullData, loadingFull]);
+
+  // Use full data for "year" range, localStorage cache for smaller ranges
+  const activeData = range === "year" && fullData ? fullData : data;
 
   const rangeData = useMemo(() => {
     const days = range === "week" ? 7 : range === "month" ? 30 : 365;
@@ -3472,7 +3546,7 @@ function AnalyticsView({ data, gitEstimatedSessions, initialRange, onRangeChange
     for (let d = days - 1; d >= 0; d--) {
       const dayStart = startOfDay(now) - d * 86400000;
       const dayEnd = dayStart + 86400000;
-      const work = data.sessions
+      const work = activeData.sessions
         .filter(
           (s) =>
             s.status === "completed" &&
@@ -3495,7 +3569,7 @@ function AnalyticsView({ data, gitEstimatedSessions, initialRange, onRangeChange
       });
     }
     return arr;
-  }, [data.sessions, range, now, gitEstimatedSessions]);
+  }, [activeData.sessions, range, now, gitEstimatedSessions]);
 
   const totalHrs = rangeData.reduce((a, r) => a + r.hours, 0);
   const avgHrs = (totalHrs / rangeData.length).toFixed(1);
@@ -3506,7 +3580,7 @@ function AnalyticsView({ data, gitEstimatedSessions, initialRange, onRangeChange
     const rangeCutoff = now - rangeDays * 86400000;
 
     const tagBreakdown = {};
-    data.sessions
+    activeData.sessions
       .filter(
         (s) =>
           s.status === "completed" &&
@@ -3524,7 +3598,7 @@ function AnalyticsView({ data, gitEstimatedSessions, initialRange, onRangeChange
     }));
 
     const hourly = Array(24).fill(0);
-    data.sessions
+    activeData.sessions
       .filter(
         (s) =>
           s.status === "completed" &&
@@ -3541,7 +3615,7 @@ function AnalyticsView({ data, gitEstimatedSessions, initialRange, onRangeChange
     }));
 
     return { tagData, hourlyData };
-  }, [data.sessions, range, now]);
+  }, [activeData.sessions, range, now]);
 
   const COLORS = [
     "#f59e0b",
@@ -3552,7 +3626,7 @@ function AnalyticsView({ data, gitEstimatedSessions, initialRange, onRangeChange
     "#06b6d4",
   ];
 
-  const completedSessions = data.sessions.filter(
+  const completedSessions = activeData.sessions.filter(
     (s) => s.status === "completed",
   );
   if (completedSessions.length === 0) {
@@ -3731,26 +3805,38 @@ function AnalyticsView({ data, gitEstimatedSessions, initialRange, onRangeChange
 }
 
 // ============ EXPORT VIEW ============
-function ExportView({ data, gitAuthors, showToast, initialPeriod, initialFormat, onPrefsChange, updateUi }) {
+function ExportView({ data, gitAuthors, showToast, initialPeriod, initialFormat, onPrefsChange, updateUi, fetchFullData }) {
   const [period, setPeriod] = useState(initialPeriod || "week");
   const [format, setFormat] = useState(initialFormat || "xlsx");
   const [includeCheckpoints, setIncludeCheckpoints] = useState(data.ui?.exportIncludeCheckpoints ?? true);
   const [includeWorkLog, setIncludeWorkLog] = useState(data.ui?.exportIncludeWorkLog ?? true);
+  const [exporting, setExporting] = useState(false);
   const preview = useMemo(() => getExportPreview(data, period), [data, period]);
 
-  const handleExport = () => {
-    const exportData = {
-      ...data,
-      commits: filterByAuthor(data.commits || [], gitAuthors),
-      includeCheckpoints,
-      includeWorkLog,
-    };
-    if (format === "xlsx") {
-      generateExcelReport(exportData, period);
-    } else {
-      generateCSVReport(exportData, period);
+  const handleExport = async () => {
+    setExporting(true);
+    try {
+      // For year/all-time exports, fetch full data from server to include trimmed history
+      let exportSource = data;
+      if ((period === "year" || period === "all") && fetchFullData) {
+        const full = await fetchFullData();
+        if (full) exportSource = full;
+      }
+      const exportData = {
+        ...exportSource,
+        commits: filterByAuthor(exportSource.commits || [], gitAuthors),
+        includeCheckpoints,
+        includeWorkLog,
+      };
+      if (format === "xlsx") {
+        generateExcelReport(exportData, period);
+      } else {
+        generateCSVReport(exportData, period);
+      }
+      showToast(`${format === "xlsx" ? "Excel" : "CSV"} report exported!`);
+    } finally {
+      setExporting(false);
     }
-    showToast(`${format === "xlsx" ? "Excel" : "CSV"} report exported!`);
   };
 
   return (
