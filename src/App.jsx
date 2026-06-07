@@ -2137,6 +2137,12 @@ function SessionsView({ data, deleteSession, updateSession, initialFilter, onFil
 
   const handleSaveCp = () => {
     if (!editingCp) return;
+    // Guard: cancel if checkpoint no longer exists
+    const session = data.sessions.find((s) => s.id === editingCp.sessionId);
+    if (!(session?.checkpoints || []).some((c) => c.id === editingCp.cpId)) {
+      setEditingCp(null);
+      return;
+    }
     const parsed = editingCp.tsInput ? parseTimeInput(editingCp.tsInput) : null;
     if (editingCp.tsInput && parsed === null) {
       showToast("Invalid time format — use h:mm AM/PM", "error");
