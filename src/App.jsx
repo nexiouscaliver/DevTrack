@@ -1056,6 +1056,33 @@ export default function App() {
   }, []);
 
   const startSession = (type = "work", tags = [], notes = "") => {
+    // Auto-close any existing running/paused session before starting a new one
+    const existing = (dataRef.current.sessions || []).find(
+      (s) => s.status === "running" || s.status === "paused",
+    );
+    if (existing) {
+      const now = Date.now();
+      let pauses = existing.pauses || [];
+      // Close any open pause
+      if (existing.status === "paused" && pauses.length > 0) {
+        pauses = pauses.map((p, i) =>
+          i === pauses.length - 1 && p.end === null ? { ...p, end: now } : p,
+        );
+      }
+      const totalDuration = now - existing.start;
+      const totalBreakTime = pauses.reduce((s, p) => s + ((p.end || now) - p.start), 0);
+      const totalWorkTime = totalDuration - totalBreakTime;
+      setData((d) => ({
+        ...d,
+        sessions: d.sessions.map((s) =>
+          s.id === existing.id
+            ? { ...s, end: now, duration: totalDuration, totalWorkTime, totalBreakTime, pauses, status: "completed" }
+            : s,
+        ),
+      }));
+      showToast("Previous session auto-completed", "warning");
+    }
+
     const session = {
       id: `s_${Date.now()}`,
       type,
