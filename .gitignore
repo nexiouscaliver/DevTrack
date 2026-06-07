@@ -25,3 +25,6 @@ dist-ssr
 
 # User data (file-based persistence)
 server/data/
+
+# Worktrees
+.worktrees/
