@@ -1235,30 +1235,29 @@ export default function App() {
   }, []);
 
   // --- Start break immediately (called from grace period UI or timer tick) ---
-   
+  // REUSES the existing grace-phase break session created by transitionPomodoroPhase
+  // instead of creating a new one (avoids orphan sessions).
   const startBreakNow = useCallback(() => {
-    const now = Date.now();
-    const settings = dataRef.current.settings?.pomodoro;
-    const interval = (settings?.breakInterval ?? 5) * 60000;
-    const breakSession = {
-      id: `s_${now}`,
-      type: "break",
-      start: now,
-      end: null,
-      duration: 0,
-      tags: ["pomodoro"],
-      notes: "",
-      status: "running",
-      pauses: [],
-      checkpoints: [],
-    };
-    setActiveSession(breakSession);
-    setData((d) => ({ ...d, sessions: [...d.sessions, breakSession] }));
-    setPomodoroPhase("break");
-    setPomodoroTarget(interval);
-    setGraceEnd(null); setGraceRemaining(null);
-    setElapsed(0);
-    showToast("Break started", "info");
+    setActiveSession((current) => {
+      if (!current) return null;
+      const settings = dataRef.current.settings?.pomodoro;
+      const interval = (settings?.breakInterval ?? 5) * 60000;
+      // Reuse the existing grace-phase break session (already in data.sessions)
+      const resumed = { ...current, status: "running" };
+      setData((d) => ({
+        ...d,
+        sessions: d.sessions.map((s) => (s.id === current.id ? resumed : s)),
+      }));
+      setPomodoroPhase("break");
+      pomodoroPhaseRef.current = "break";
+      setPomodoroTarget(interval);
+      pomodoroTargetRef.current = interval;
+      setGraceEnd(null);
+      setGraceRemaining(null);
+      setElapsed(0);
+      showToast("Break started", "info");
+      return resumed;
+    });
   }, [showToast]);
 
   // --- Atomic pomodoro phase transition (avoids React batching issues) ---
@@ -1287,7 +1286,7 @@ export default function App() {
       };
 
       const nextSession = {
-        id: `s_${now}`,
+        id: `s_${now}_${Math.random().toString(36).slice(2, 8)}`,
         type: toType,
         start: now,
         end: null,
@@ -1329,6 +1328,8 @@ export default function App() {
     const settings = dataRef.current.settings?.pomodoro;
 
     if (phase === "work") {
+      // Immediately update ref to prevent double-fire from next tick
+      pomodoroPhaseRef.current = "grace";
       pomodoroNotify("🍅 Work interval complete! Break in 30s...", "success");
       if (settings?.autoStartBreak !== false) {
         transitionPomodoroPhase("work", "grace", "break");
@@ -1364,6 +1365,9 @@ export default function App() {
         });
       }
     } else if (phase === "break") {
+      // Immediately update ref to prevent double-fire from next tick
+      pomodoroPhaseRef.current = null;
+      pomodoroTargetRef.current = null;
       pomodoroNotify("Break over — ready for the next pomodoro?", "info");
       setActiveSession((current) => {
         if (!current) return null;
@@ -1441,9 +1445,31 @@ export default function App() {
     if (pomodoroPhaseRef.current !== "break" && pomodoroPhaseRef.current !== "grace") return;
 
     if (pomodoroPhaseRef.current === "grace") {
-      setGraceEnd(null); setGraceRemaining(null);
-      setPomodoroPhase(null);
-      setPomodoroTarget(null);
+      // Complete the grace-phase break session (created by transitionPomodoroPhase) instead of leaving it orphaned
+      setActiveSession((current) => {
+        if (!current) return null;
+        const now = Date.now();
+        const completed = {
+          ...current,
+          end: now,
+          duration: now - current.start,
+          totalWorkTime: 0,
+          totalBreakTime: now - current.start,
+          pauses: [],
+          status: "completed",
+        };
+        setData((d) => ({
+          ...d,
+          sessions: d.sessions.map((s) => (s.id === current.id ? completed : s)),
+        }));
+        setPomodoroPhase(null);
+        pomodoroPhaseRef.current = null;
+        setPomodoroTarget(null);
+        pomodoroTargetRef.current = null;
+        setGraceEnd(null);
+        setGraceRemaining(null);
+        return null;
+      });
       return;
     }
 
@@ -2839,7 +2865,7 @@ function TimerView({
                     return (
                       <circle
                         cx="128" cy="128" r="110" fill="none"
-                        stroke={isPaused || pomodoroPhase === "break" ? "url(#timerBreakGrad)" : "url(#timerGrad)"}
+                        stroke={isPaused || pomodoroPhase === "break" || pomodoroPhase === "grace" ? "url(#timerBreakGrad)" : "url(#timerGrad)"}
                         strokeWidth="6"
                         strokeDasharray={`${progress} 691`}
                         strokeLinecap="round"
@@ -2860,6 +2886,20 @@ function TimerView({
                 <div className="text-center">
                   {(() => {
                     const isPomodoro = timerMode === "pomodoro" && pomodoroPhase;
+                    if (isPomodoro && pomodoroPhase === "grace") {
+                      // Grace phase: show grace countdown in the ring
+                      const remaining = Math.max(0, (graceRemaining || 0) * 1000);
+                      return (
+                        <>
+                          <div className="font-mono text-2xl sm:text-3xl font-bold text-amber-300">
+                            {formatDuration(remaining)}
+                          </div>
+                          <div className="text-xs uppercase tracking-widest text-stone-400 mt-2">
+                            Break in...
+                          </div>
+                        </>
+                      );
+                    }
                     if (isPomodoro && pomodoroTarget) {
                       const remaining = Math.max(0, pomodoroTarget - pomodoroElapsed);
                       return (
@@ -2868,7 +2908,7 @@ function TimerView({
                             {formatDuration(remaining)}
                           </div>
                           <div className="text-xs uppercase tracking-widest text-stone-400 mt-2">
-                            {pomodoroPhase === "grace" ? "Starting break..." : pomodoroPhase === "work" ? "Work" : "Break"}
+                            {pomodoroPhase === "work" ? "Work" : "Break"}
                           </div>
                           <div className="text-[10px] text-stone-600 mt-1">
                             Elapsed: {formatDuration(pomodoroElapsed)}
