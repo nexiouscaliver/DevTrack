@@ -1,0 +1,38 @@
+services:
+  devtrack:
+    build: .
+    container_name: devtrack
+    ports:
+      # Host port is configurable via DEVTRACK_PORT env var (default 9000).
+      # The container always listens on port 9000 internally.
+      - "${DEVTRACK_PORT:-9000}:9000"
+    volumes:
+      # Data persistence — sessions, settings, version snapshots
+      # On Linux hosts, ensure the directory is writable by UID 1000:
+      #   mkdir -p ./devtrack-data && chown 1000:1000 ./devtrack-data
+      - ./devtrack-data:/app/server/data
+      # ──────────────────────────────────────────────────────
+      # Git repository tracking (optional)
+      # Uncomment and edit to mount repos you want to track.
+      # Use the container path (/repos/<name>) in the DevTrack UI.
+      # The :ro flag ensures read-only access (git ops are read-only).
+      #
+      # - /path/to/your/repo:/repos/your-repo:ro
+      # - /path/to/another/repo:/repos/another-repo:ro
+      # ──────────────────────────────────────────────────────
+    environment:
+      - PORT=9000
+      - BIND_ADDR=0.0.0.0
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 512m
+    pids_limit: 100
+    healthcheck:
+      # Health check reads PORT from the container's environment so it
+      # stays in sync if PORT is ever changed from the default 9000.
+      test: ["CMD", "node", "-e", "const p=process.env.PORT||9000;const http=require('http');http.get('http://localhost:'+p+'/api/health',(r)=>{process.exit(r.statusCode===200?0:1);}).on('error',()=>process.exit(1));"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s

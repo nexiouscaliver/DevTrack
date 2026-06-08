@@ -142,6 +142,73 @@ Open [http://localhost:9000](http://localhost:9000) — the app is ready to use.
 
 ---
 
+## Docker
+
+Run DevTrack with Docker — no Node.js or npm required.
+
+```bash
+# Build and start
+docker compose up -d
+
+# Open http://localhost:9000
+```
+
+### Commands
+
+| Command | Description |
+|---------|-------------|
+| `docker compose up -d` | Start in background |
+| `docker compose down` | Stop and remove container |
+| `docker compose logs -f` | View live logs |
+| `docker compose restart` | Restart the container |
+
+### Standalone Docker
+
+```bash
+docker build -t devtrack .
+docker run -d \
+  --name devtrack \
+  -p 9000:9000 \
+  -v ./devtrack-data:/app/server/data \
+  --restart unless-stopped \
+  devtrack
+```
+
+### Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DEVTRACK_PORT` | `9000` | Host port (set via `.env` file or environment) |
+| `BIND_ADDR` | `0.0.0.0` | Server bind address inside container |
+
+To use a custom host port, create a `.env` file in the project root:
+
+```
+DEVTRACK_PORT=8080
+```
+
+### Data
+
+Your data is stored in `./devtrack-data/` on the host, mapped to `/app/server/data` in the container. This includes sessions, settings, and version snapshots. The directory is created automatically on first run.
+
+### Git Integration
+
+To track git repositories, mount them as volumes in `docker-compose.yml`:
+
+```yaml
+volumes:
+  - ./devtrack-data:/app/server/data
+  - /path/to/your/repo:/repos/your-repo:ro   # add your repos
+```
+
+Then use the **container path** (`/repos/your-repo`) in the DevTrack UI instead of the host path.
+
+### Security
+
+> **Note:** The Docker container binds to `0.0.0.0`, making DevTrack accessible on your local network. DevTrack has no authentication. Only run on trusted networks, or use `--network=host -e BIND_ADDR=127.0.0.1` for localhost-only access.
+
+---
+
 ## Security
 
 DevTrack takes security seriously even though it runs entirely locally:
@@ -149,7 +216,7 @@ DevTrack takes security seriously even though it runs entirely locally:
 - **Path traversal prevention** — all paths validated, `..` sequences rejected
 - **Shell escaping** — `shEscape()` wraps all git command arguments
 - **Read-only git operations** — no push, pull, checkout, or mutating git commands
-- **No remote access** — server binds to `127.0.0.1` only
+- **No remote access** — server binds to `127.0.0.1` only (in development mode)
 - **Size limits** — 5MB request limit, 10,000 item array caps
 - **Private note filtering** — private content excluded from all exports
 
@@ -229,7 +296,7 @@ Contributions welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for setup and code
 - [ ] Keyboard shortcuts for timer controls
 - [ ] Calendar view for session visualization
 - [ ] Browser extension for external tool tracking
-- [ ] Docker compose for one-command deployment
+- [x] Docker compose for one-command deployment
 
 ---
 
