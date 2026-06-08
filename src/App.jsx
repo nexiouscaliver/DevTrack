@@ -2816,7 +2816,12 @@ function TimerView({
                     : "bg-emerald-500/15 text-emerald-300 border border-emerald-500/30"
                 }`}>
                   <span className={`w-2 h-2 rounded-full ${isPaused ? "bg-sky-400" : "bg-emerald-400 animate-pulse"}`} />
-                  {isPaused ? "On Break" : "Working"}
+                  {timerMode === "pomodoro" && pomodoroPhase && "🍅 "}
+                  {pomodoroPhase === "grace"
+                    ? "Break Starting..."
+                    : isPaused
+                      ? "On Break"
+                      : "Working"}
                 </span>
               </div>
             )}
@@ -2826,15 +2831,21 @@ function TimerView({
               <div className={`w-48 h-48 sm:w-56 sm:h-56 md:w-64 md:h-64 rounded-full flex items-center justify-center relative`}>
                 <svg className="absolute inset-0 w-full h-full -rotate-90" viewBox="0 0 256 256">
                   <circle cx="128" cy="128" r="110" fill="none" stroke="#292524" strokeWidth="6" />
-                  {activeSession && (
-                    <circle
-                      cx="128" cy="128" r="110" fill="none"
-                      stroke={isPaused ? "url(#timerBreakGrad)" : "url(#timerGrad)"}
-                      strokeWidth="6"
-                      strokeDasharray={`${Math.min(((displayWorkTime) / ((data.settings.dailyGoal || 8) * 3600000)) * 691, 691)} 691`}
-                      strokeLinecap="round"
-                    />
-                  )}
+                  {activeSession && (() => {
+                    const isPomodoro = timerMode === "pomodoro" && pomodoroPhase;
+                    const progress = isPomodoro && pomodoroTarget
+                      ? Math.min((pomodoroElapsed / pomodoroTarget) * 691, 691)
+                      : Math.min(((displayWorkTime) / ((data.settings.dailyGoal || 8) * 3600000)) * 691, 691);
+                    return (
+                      <circle
+                        cx="128" cy="128" r="110" fill="none"
+                        stroke={isPaused || pomodoroPhase === "break" ? "url(#timerBreakGrad)" : "url(#timerGrad)"}
+                        strokeWidth="6"
+                        strokeDasharray={`${progress} 691`}
+                        strokeLinecap="round"
+                      />
+                    );
+                  })()}
                   <defs>
                     <linearGradient id="timerGrad">
                       <stop offset="0%" stopColor="#f59e0b" />
@@ -2847,12 +2858,35 @@ function TimerView({
                   </defs>
                 </svg>
                 <div className="text-center">
-                  <div className="font-mono text-2xl sm:text-3xl font-bold">
-                    {!activeSession ? "00:00:00" : formatDuration(displayWorkTime)}
-                  </div>
-                  <div className="text-xs uppercase tracking-widest text-stone-400 mt-2">
-                    {!activeSession ? "Ready" : isPaused ? "Work Time" : "Elapsed"}
-                  </div>
+                  {(() => {
+                    const isPomodoro = timerMode === "pomodoro" && pomodoroPhase;
+                    if (isPomodoro && pomodoroTarget) {
+                      const remaining = Math.max(0, pomodoroTarget - pomodoroElapsed);
+                      return (
+                        <>
+                          <div className="font-mono text-2xl sm:text-3xl font-bold">
+                            {formatDuration(remaining)}
+                          </div>
+                          <div className="text-xs uppercase tracking-widest text-stone-400 mt-2">
+                            {pomodoroPhase === "grace" ? "Starting break..." : pomodoroPhase === "work" ? "Work" : "Break"}
+                          </div>
+                          <div className="text-[10px] text-stone-600 mt-1">
+                            Elapsed: {formatDuration(pomodoroElapsed)}
+                          </div>
+                        </>
+                      );
+                    }
+                    return (
+                      <>
+                        <div className="font-mono text-2xl sm:text-3xl font-bold">
+                          {!activeSession ? "00:00:00" : formatDuration(displayWorkTime)}
+                        </div>
+                        <div className="text-xs uppercase tracking-widest text-stone-400 mt-2">
+                          {!activeSession ? "Ready" : isPaused ? "Work Time" : "Elapsed"}
+                        </div>
+                      </>
+                    );
+                  })()}
                 </div>
               </div>
             </div>
@@ -2872,6 +2906,23 @@ function TimerView({
                   </div>
                 </div>
               </motion.div>
+            )}
+
+            {/* Pomodoro counter — completed intervals today */}
+            {timerMode === "pomodoro" && pomodoroCycle > 0 && (
+              <div className="mb-5 flex items-center justify-center gap-1.5">
+                {Array.from({ length: Math.min(pomodoroCycle, 8) }).map((_, i) => (
+                  <motion.span
+                    key={i}
+                    initial={{ scale: 0 }}
+                    animate={{ scale: 1 }}
+                    className="w-2.5 h-2.5 rounded-full bg-amber-400"
+                  />
+                ))}
+                {pomodoroCycle > 8 && (
+                  <span className="text-xs text-amber-400 font-medium ml-1">+{pomodoroCycle - 8}</span>
+                )}
+              </div>
             )}
 
             {/* Pauses taken indicator */}
