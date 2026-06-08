@@ -848,13 +848,13 @@ export default function App() {
 
   // --- Pomodoro state ---
   // pomodoroCycle is derived from sessions (auto-resets on new day)
-  // eslint-disable-next-line no-unused-vars
+   
   const pomodoroCycle = useMemo(() => {
     return (data.sessions || []).filter(
       (s) => isToday(s.start) && s.status === "completed" && s.type === "work" && (s.tags || []).includes("pomodoro"),
     ).length;
   }, [data.sessions]);
-  // eslint-disable-next-line no-unused-vars
+   
   const [pomodoroPhase, setPomodoroPhase] = useState(() => {
     const timerMode = initialData?.ui?.timerMode;
     if (timerMode !== "pomodoro") return null;
@@ -864,7 +864,7 @@ export default function App() {
     if (!running || !(running.tags || []).includes("pomodoro")) return null;
     return running.type === "work" ? "work" : "break";
   });
-  // eslint-disable-next-line no-unused-vars
+   
   const [pomodoroTarget, setPomodoroTarget] = useState(() => {
     const phase = (() => {
       const timerMode = initialData?.ui?.timerMode;
@@ -882,7 +882,7 @@ export default function App() {
       : (settings?.breakInterval ?? 5);
     return interval * 60000;
   });
-  // eslint-disable-next-line no-unused-vars
+   
   const [graceEnd, setGraceEnd] = useState(null);
   const [graceRemaining, setGraceRemaining] = useState(null);
   const pomodoroTargetRef = useRef(pomodoroTarget);
@@ -892,7 +892,7 @@ export default function App() {
   useEffect(() => { pomodoroPhaseRef.current = pomodoroPhase; }, [pomodoroPhase]);
 
   // Custom elapsed for pomodoro: work-time only, ignores current pause
-  // eslint-disable-next-line no-unused-vars
+   
   const pomodoroElapsed = useMemo(() => {
     if (!activeSession || pomodoroPhase !== "work") return elapsed;
     if (activeSession.status !== "paused") return elapsed;
@@ -1216,13 +1216,13 @@ export default function App() {
   }, [showToast, playNotificationSound]);
 
   // --- Pomodoro mode toggle ---
-  // eslint-disable-next-line no-unused-vars
+   
   const setTimerMode = useCallback((mode) => {
     setData((d) => ({ ...d, ui: { ...d.ui, timerMode: mode } }));
   }, []);
 
   // --- Start a pomodoro work session ---
-  // eslint-disable-next-line no-unused-vars
+   
   const startPomodoro = useCallback((tags = [], notes = "") => {
     /* eslint-disable react-hooks/immutability */
     startSession("work", ["pomodoro", ...tags], notes);
@@ -1235,7 +1235,7 @@ export default function App() {
   }, []);
 
   // --- Start break immediately (called from grace period UI or timer tick) ---
-  // eslint-disable-next-line no-unused-vars
+   
   const startBreakNow = useCallback(() => {
     const now = Date.now();
     const settings = dataRef.current.settings?.pomodoro;
@@ -1323,7 +1323,7 @@ export default function App() {
   }, []);
 
   // --- Handle pomodoro interval completion ---
-  // eslint-disable-next-line no-unused-vars
+   
   const handlePomodoroIntervalComplete = useCallback(() => {
     const phase = pomodoroPhaseRef.current;
     const settings = dataRef.current.settings?.pomodoro;
@@ -1432,11 +1432,11 @@ export default function App() {
     tick();
     const id = setInterval(tick, 1000);
     return () => clearInterval(id);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+   
   }, [activeSession, handlePomodoroIntervalComplete, startBreakNow, graceEnd]);
 
     // --- Skip current break (end break session, go to prompt for next work) ---
-  // eslint-disable-next-line no-unused-vars
+   
   const skipBreak = useCallback(() => {
     if (pomodoroPhaseRef.current !== "break" && pomodoroPhaseRef.current !== "grace") return;
 
@@ -1472,7 +1472,7 @@ export default function App() {
   }, []);
 
   // --- Extend current work interval by 5 minutes ---
-  // eslint-disable-next-line no-unused-vars
+   
   const extendWork = useCallback(() => {
     if (pomodoroPhaseRef.current !== "work") return;
     setPomodoroTarget((prev) => (prev ? prev + 5 * 60000 : null));
@@ -1485,7 +1485,7 @@ export default function App() {
       setPomodoroTarget(null);
       setGraceEnd(null); setGraceRemaining(null);
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+   
   }, [activeSession]);
 
   const startSession = (type = "work", tags = [], notes = "") => {
@@ -2632,24 +2632,24 @@ function TimerView({
   deleteCheckpoint,
   data,
   showToast,
-  // eslint-disable-next-line no-unused-vars -- used by later Pomodoro UI tasks
+   
   pomodoroPhase,
-  // eslint-disable-next-line no-unused-vars -- used by later Pomodoro UI tasks
+   
   pomodoroCycle,
-  // eslint-disable-next-line no-unused-vars -- used by later Pomodoro UI tasks
+   
   pomodoroTarget,
-  // eslint-disable-next-line no-unused-vars -- used by later Pomodoro UI tasks
+   
   pomodoroElapsed,
   timerMode,
-  // eslint-disable-next-line no-unused-vars -- used by later Pomodoro UI tasks
+   
   graceRemaining,
   setTimerMode,
-  // eslint-disable-next-line no-unused-vars -- used by later Pomodoro UI tasks
+   
   skipBreak,
-  // eslint-disable-next-line no-unused-vars -- used by later Pomodoro UI tasks
+   
   extendWork,
   startPomodoro,
-  // eslint-disable-next-line no-unused-vars -- used by later Pomodoro UI tasks
+   
   startBreakNow,
 }) {
   const [tags, setTags] = useState(() => activeSession?.tags?.join(", ") || "");
