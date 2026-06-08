@@ -1230,7 +1230,7 @@ export default function App() {
     const settings = dataRef.current.settings?.pomodoro;
     setPomodoroPhase("work");
     setPomodoroTarget((settings?.workInterval ?? 25) * 60000);
-    setGraceEnd(null);
+    setGraceEnd(null); setGraceRemaining(null);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -1256,7 +1256,7 @@ export default function App() {
     setData((d) => ({ ...d, sessions: [...d.sessions, breakSession] }));
     setPomodoroPhase("break");
     setPomodoroTarget(interval);
-    setGraceEnd(null);
+    setGraceEnd(null); setGraceRemaining(null);
     setElapsed(0);
     showToast("Break started", "info");
   }, [showToast]);
@@ -1309,7 +1309,7 @@ export default function App() {
         setGraceEnd(Date.now() + 30000);
         setPomodoroTarget(null);
       } else {
-        setGraceEnd(null);
+        setGraceEnd(null); setGraceRemaining(null);
         const settings = dataRef.current.settings?.pomodoro;
         const interval = toType === "work"
           ? (settings?.workInterval ?? 25)
@@ -1359,7 +1359,7 @@ export default function App() {
           }));
           setPomodoroPhase(null);
           setPomodoroTarget(null);
-          setGraceEnd(null);
+          setGraceEnd(null); setGraceRemaining(null);
           return null;
         });
       }
@@ -1384,7 +1384,7 @@ export default function App() {
         }));
         setPomodoroPhase(null);
         setPomodoroTarget(null);
-        setGraceEnd(null);
+        setGraceEnd(null); setGraceRemaining(null);
         return null;
       });
     }
@@ -1426,6 +1426,8 @@ export default function App() {
           startBreakNow();
         }
       }
+      // Update grace remaining countdown
+      setGraceRemaining(graceEnd ? Math.max(0, Math.ceil((graceEnd - Date.now()) / 1000)) : null);
     };
     tick();
     const id = setInterval(tick, 1000);
@@ -1439,7 +1441,7 @@ export default function App() {
     if (pomodoroPhaseRef.current !== "break" && pomodoroPhaseRef.current !== "grace") return;
 
     if (pomodoroPhaseRef.current === "grace") {
-      setGraceEnd(null);
+      setGraceEnd(null); setGraceRemaining(null);
       setPomodoroPhase(null);
       setPomodoroTarget(null);
       return;
@@ -1464,7 +1466,7 @@ export default function App() {
       }));
       setPomodoroPhase(null);
       setPomodoroTarget(null);
-      setGraceEnd(null);
+      setGraceEnd(null); setGraceRemaining(null);
       return null;
     });
   }, []);
@@ -1481,7 +1483,7 @@ export default function App() {
     if (!activeSession && pomodoroPhaseRef.current) {
       setPomodoroPhase(null);
       setPomodoroTarget(null);
-      setGraceEnd(null);
+      setGraceEnd(null); setGraceRemaining(null);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeSession]);
