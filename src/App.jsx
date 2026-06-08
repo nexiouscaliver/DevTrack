@@ -2925,6 +2925,34 @@ function TimerView({
               </div>
             )}
 
+            {/* Grace period countdown — pomodoro mode */}
+            {timerMode === "pomodoro" && pomodoroPhase === "grace" && graceRemaining !== null && graceRemaining > 0 && (
+              <motion.div
+                initial={{ opacity: 0, y: -10 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="mb-5 p-3 px-5 rounded-xl bg-amber-500/10 border border-amber-500/20 inline-flex items-center gap-4"
+              >
+                <div className="text-center">
+                  <div className="text-[10px] text-amber-400/70 font-medium uppercase tracking-wider">Break in</div>
+                  <div className="font-mono text-lg font-bold text-amber-300">{graceRemaining}s</div>
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    onClick={startBreakNow}
+                    className="px-3 py-1.5 rounded-lg bg-sky-500/20 text-sky-300 text-xs font-medium hover:bg-sky-500/30 flex items-center gap-1"
+                  >
+                    <Icon path={ICONS.play} size={12} /> Start Break Now
+                  </button>
+                  <button
+                    onClick={skipBreak}
+                    className="px-3 py-1.5 rounded-lg bg-stone-700/50 text-stone-300 text-xs font-medium hover:bg-stone-700 flex items-center gap-1"
+                  >
+                    <Icon path={ICONS.skipForward} size={12} /> Skip Break
+                  </button>
+                </div>
+              </motion.div>
+            )}
+
             {/* Pauses taken indicator */}
             {activeSession && (activeSession.pauses || []).filter((p) => p.end !== null).length > 0 && !isPaused && (
               <div className="mb-5 inline-flex items-center gap-2 text-xs text-stone-500">
@@ -3089,20 +3117,38 @@ function TimerView({
                     >
                       <Icon path={ICONS.play} size={16} /> Resume
                     </button>
-                  ) : (
+                  ) : !isPaused && !(timerMode === "pomodoro" && pomodoroPhase === "break") ? (
                     <button
                       onClick={pauseSession}
                       className="flex-1 py-2.5 rounded-xl bg-gradient-to-r from-sky-500 to-blue-600 hover:from-sky-600 hover:to-blue-700 font-semibold text-sm flex items-center justify-center gap-2 shadow-lg shadow-sky-500/20 active:scale-[0.98] transition-all"
                     >
                       <Icon path={ICONS.pause} size={16} /> Break
                     </button>
-                  )}
+                  ) : null}
                   <button
                     onClick={stopSession}
                     className="flex-1 py-2.5 rounded-xl bg-stone-800 hover:bg-rose-900/40 text-sm font-medium flex items-center justify-center gap-1.5 border border-stone-700/50 hover:border-rose-500/30 active:scale-[0.98] transition-all text-stone-300 hover:text-rose-300"
                   >
                     <Icon path={ICONS.stop} size={14} /> Finish
                   </button>
+                  {/* Pomodoro: Extend Work button */}
+                  {timerMode === "pomodoro" && pomodoroPhase === "work" && (
+                    <button
+                      onClick={extendWork}
+                      className="px-4 py-2.5 rounded-xl bg-stone-700/50 border border-stone-600/50 hover:bg-stone-700 font-medium text-sm flex items-center gap-2 transition-all"
+                    >
+                      <Icon path={ICONS.forward} size={14} /> +5 min
+                    </button>
+                  )}
+                  {/* Pomodoro: Skip Break button (during break) */}
+                  {timerMode === "pomodoro" && pomodoroPhase === "break" && (
+                    <button
+                      onClick={skipBreak}
+                      className="px-4 py-2.5 rounded-xl bg-stone-700/50 border border-stone-600/50 hover:bg-stone-700 font-medium text-sm flex items-center gap-2 transition-all"
+                    >
+                      <Icon path={ICONS.skipForward} size={14} /> Skip Break
+                    </button>
+                  )}
                 </div>
                 <div className="flex items-center justify-center gap-2 text-xs text-stone-500 pt-1">
                   <span>Started {formatTime(activeSession.start)}</span>
