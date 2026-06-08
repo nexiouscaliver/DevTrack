@@ -22,6 +22,10 @@ services:
       - PORT=9000
       - BIND_ADDR=0.0.0.0
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 512m
+    pids_limit: 100
     healthcheck:
       # Health check reads PORT from the container's environment so it
       # stays in sync if PORT is ever changed from the default 9000.

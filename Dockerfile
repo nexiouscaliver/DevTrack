@@ -26,6 +26,12 @@ RUN npm ci --omit=dev
 COPY server/ ./server/
 COPY --from=builder /app/dist ./dist
 
+# Ensure data directory is writable by the node user
+RUN mkdir -p /app/server/data && chown node:node /app/server/data
+
+# Run as non-root user (node:22-slim includes the 'node' user)
+USER node
+
 # Defaults — can be overridden via docker-compose or docker run -e
 ENV PORT=9000
 ENV BIND_ADDR=0.0.0.0
