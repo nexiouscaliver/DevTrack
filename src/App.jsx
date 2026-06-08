@@ -2632,6 +2632,25 @@ function TimerView({
   deleteCheckpoint,
   data,
   showToast,
+  // eslint-disable-next-line no-unused-vars -- used by later Pomodoro UI tasks
+  pomodoroPhase,
+  // eslint-disable-next-line no-unused-vars -- used by later Pomodoro UI tasks
+  pomodoroCycle,
+  // eslint-disable-next-line no-unused-vars -- used by later Pomodoro UI tasks
+  pomodoroTarget,
+  // eslint-disable-next-line no-unused-vars -- used by later Pomodoro UI tasks
+  pomodoroElapsed,
+  timerMode,
+  // eslint-disable-next-line no-unused-vars -- used by later Pomodoro UI tasks
+  graceRemaining,
+  setTimerMode,
+  // eslint-disable-next-line no-unused-vars -- used by later Pomodoro UI tasks
+  skipBreak,
+  // eslint-disable-next-line no-unused-vars -- used by later Pomodoro UI tasks
+  extendWork,
+  startPomodoro,
+  // eslint-disable-next-line no-unused-vars -- used by later Pomodoro UI tasks
+  startBreakNow,
 }) {
   const [tags, setTags] = useState(() => activeSession?.tags?.join(", ") || "");
   const [notes, setNotes] = useState(() => activeSession?.notes || "");
@@ -2663,14 +2682,12 @@ function TimerView({
   }, [activeSession?.id]); // only on session identity change, not every prop update
 
   const handleStart = () => {
-    startSession(
-      "work",
-      tags
-        .split(",")
-        .map((t) => t.trim())
-        .filter(Boolean),
-      notes,
-    );
+    const parsedTags = tags.split(",").map((t) => t.trim()).filter(Boolean);
+    if (timerMode === "pomodoro") {
+      startPomodoro(parsedTags, notes);
+    } else {
+      startSession("work", parsedTags, notes);
+    }
     setTags("");
     setNotes("");
   };
@@ -2755,8 +2772,38 @@ function TimerView({
   return (
     <div className="max-w-4xl mx-auto space-y-6">
       <div>
-        <h2 className="text-2xl font-bold">Focus Timer</h2>
-        <p className="text-stone-400">One session. Pause when you need a break. Stop when you&apos;re done.</p>
+        <div className="flex items-center justify-between mb-1">
+          <h2 className="text-2xl font-bold">Focus Timer</h2>
+          {!activeSession && (
+            <div className="flex bg-stone-800 rounded-lg p-0.5 text-xs">
+              <button
+                onClick={() => setTimerMode("free")}
+                className={`px-3 py-1.5 rounded-md font-medium transition-all ${
+                  timerMode === "free"
+                    ? "bg-gradient-to-r from-amber-500 to-orange-600 text-white shadow-sm"
+                    : "text-stone-400 hover:text-stone-200"
+                }`}
+              >
+                Free Timer
+              </button>
+              <button
+                onClick={() => setTimerMode("pomodoro")}
+                className={`px-3 py-1.5 rounded-md font-medium transition-all ${
+                  timerMode === "pomodoro"
+                    ? "bg-gradient-to-r from-amber-500 to-orange-600 text-white shadow-sm"
+                    : "text-stone-400 hover:text-stone-200"
+                }`}
+              >
+                🍅 Pomodoro
+              </button>
+            </div>
+          )}
+        </div>
+        <p className="text-stone-400">
+          {timerMode === "pomodoro"
+            ? "Work in focused intervals with automatic break cycling."
+            : "One session. Pause when you need a break. Stop when you're done."}
+        </p>
       </div>
 
       <div className="bg-gradient-to-br from-stone-900 to-stone-900/50 border border-stone-800 rounded-2xl p-6 sm:p-8 text-center">
@@ -2866,7 +2913,7 @@ function TimerView({
                   onClick={handleStart}
                   className="w-full py-2.5 rounded-xl bg-gradient-to-r from-amber-500 to-orange-600 hover:from-amber-600 hover:to-orange-700 font-semibold text-sm flex items-center justify-center gap-2 shadow-lg shadow-amber-500/20 active:scale-[0.98] transition-all"
                 >
-                  <Icon path={ICONS.play} size={16} /> Start Work Session
+                  <Icon path={ICONS.play} size={16} /> {timerMode === "pomodoro" ? "Start Pomodoro" : "Start Work Session"}
                 </button>
               </div>
             ) : (
@@ -5134,7 +5181,16 @@ function WorkLogView({
 
 // ============ SETTINGS MODAL ============
 function SettingsModal({ open, onClose, data, updateSettings, showToast, onReset, onOpenSync }) {
-  const [form, setForm] = useState(data.settings);
+  const [form, setForm] = useState(() => ({
+    ...data.settings,
+    pomodoro: {
+      workInterval: 25,
+      breakInterval: 5,
+      autoStartBreak: true,
+      notifications: true,
+      ...data.settings?.pomodoro,
+    },
+  }));
   const [newIdentityName, setNewIdentityName] = useState("");
   const [newIdentityEmail, setNewIdentityEmail] = useState("");
 
