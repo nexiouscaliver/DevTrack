@@ -1184,6 +1184,273 @@ export default function App() {
     toastTimer.current = setTimeout(() => setToast(null), 3000);
   }, []);
 
+  // --- Pomodoro notification sound (Web Audio API, 440Hz sine, 200ms) ---
+  const playNotificationSound = useCallback(() => {
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.value = 440;
+      gain.gain.setValueAtTime(0.3, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.2);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.2);
+    } catch {
+      // AudioContext not available — silent fallback
+    }
+  }, []);
+
+  // --- Pomodoro notification (toast + browser notification + sound) ---
+  const pomodoroNotify = useCallback((message, type = "success") => {
+    showToast(message, type);
+    const settings = dataRef.current.settings?.pomodoro;
+    if (settings?.notifications) {
+      playNotificationSound();
+      if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+        try {
+          const n = new Notification("DevTrack — Pomodoro", {
+            body: message.replace(/🍅\s*/g, ""),
+            silent: true,
+          });
+          n.onclick = () => { window.focus(); n.close(); };
+        } catch {
+          // Notification API not available
+        }
+      }
+    }
+  }, [showToast, playNotificationSound]);
+
+  // --- Pomodoro mode toggle ---
+  // eslint-disable-next-line no-unused-vars
+  const setTimerMode = useCallback((mode) => {
+    setData((d) => ({ ...d, ui: { ...d.ui, timerMode: mode } }));
+  }, []);
+
+  // --- Start a pomodoro work session ---
+  // eslint-disable-next-line no-unused-vars
+  const startPomodoro = useCallback((tags = [], notes = "") => {
+    /* eslint-disable react-hooks/immutability */
+    startSession("work", ["pomodoro", ...tags], notes);
+    /* eslint-enable react-hooks/immutability */
+    const settings = dataRef.current.settings?.pomodoro;
+    setPomodoroPhase("work");
+    setPomodoroTarget((settings?.workInterval ?? 25) * 60000);
+    setGraceEnd(null);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // --- Start break immediately (called from grace period UI or timer tick) ---
+  // eslint-disable-next-line no-unused-vars
+  const startBreakNow = useCallback(() => {
+    const now = Date.now();
+    const settings = dataRef.current.settings?.pomodoro;
+    const interval = (settings?.breakInterval ?? 5) * 60000;
+    const breakSession = {
+      id: `s_${now}`,
+      type: "break",
+      start: now,
+      end: null,
+      duration: 0,
+      tags: ["pomodoro"],
+      notes: "",
+      status: "running",
+      pauses: [],
+      checkpoints: [],
+    };
+    setActiveSession(breakSession);
+    setData((d) => ({ ...d, sessions: [...d.sessions, breakSession] }));
+    setPomodoroPhase("break");
+    setPomodoroTarget(interval);
+    setGraceEnd(null);
+    setElapsed(0);
+    showToast("Break started", "info");
+  }, [showToast]);
+
+  // --- Atomic pomodoro phase transition (avoids React batching issues) ---
+  const transitionPomodoroPhase = useCallback((fromPhase, toPhase, toType) => {
+    const now = Date.now();
+
+    setActiveSession((current) => {
+      if (!current) return null;
+      let pauses = current.pauses || [];
+      if (current.status === "paused" && pauses.length > 0) {
+        pauses = pauses.map((p, i) =>
+          i === pauses.length - 1 && p.end === null ? { ...p, end: now } : p,
+        );
+      }
+      const totalDuration = now - current.start;
+      const totalBreakTime = pauses.reduce((s, p) => s + ((p.end || now) - p.start), 0);
+      const totalWorkTime = totalDuration - totalBreakTime;
+      const completed = {
+        ...current,
+        end: now,
+        duration: totalDuration,
+        totalWorkTime,
+        totalBreakTime,
+        pauses,
+        status: "completed",
+      };
+
+      const nextSession = {
+        id: `s_${now}`,
+        type: toType,
+        start: now,
+        end: null,
+        duration: 0,
+        tags: ["pomodoro"],
+        notes: "",
+        status: "running",
+        pauses: [],
+        checkpoints: [],
+      };
+
+      setData((d) => ({
+        ...d,
+        sessions: d.sessions.map((s) => (s.id === current.id ? completed : s)).concat(nextSession),
+      }));
+
+      setPomodoroPhase(toPhase === "grace" ? "grace" : toType === "work" ? "work" : "break");
+      if (toPhase === "grace") {
+        setGraceEnd(Date.now() + 30000);
+        setPomodoroTarget(null);
+      } else {
+        setGraceEnd(null);
+        const settings = dataRef.current.settings?.pomodoro;
+        const interval = toType === "work"
+          ? (settings?.workInterval ?? 25)
+          : (settings?.breakInterval ?? 5);
+        setPomodoroTarget(interval * 60000);
+      }
+      setElapsed(0);
+
+      return nextSession;
+    });
+  }, []);
+
+  // --- Handle pomodoro interval completion ---
+  // eslint-disable-next-line no-unused-vars
+  const handlePomodoroIntervalComplete = useCallback(() => {
+    const phase = pomodoroPhaseRef.current;
+    const settings = dataRef.current.settings?.pomodoro;
+
+    if (phase === "work") {
+      pomodoroNotify("🍅 Work interval complete! Break in 30s...", "success");
+      if (settings?.autoStartBreak !== false) {
+        transitionPomodoroPhase("work", "grace", "break");
+      } else {
+        setActiveSession((current) => {
+          if (!current) return null;
+          const now = Date.now();
+          let pauses = current.pauses || [];
+          if (current.status === "paused" && pauses.length > 0) {
+            pauses = pauses.map((p, i) =>
+              i === pauses.length - 1 && p.end === null ? { ...p, end: now } : p,
+            );
+          }
+          const totalDuration = now - current.start;
+          const totalBreakTime = pauses.reduce((s, p) => s + ((p.end || now) - p.start), 0);
+          const completed = {
+            ...current,
+            end: now,
+            duration: totalDuration,
+            totalWorkTime: totalDuration - totalBreakTime,
+            totalBreakTime,
+            pauses,
+            status: "completed",
+          };
+          setData((d) => ({
+            ...d,
+            sessions: d.sessions.map((s) => (s.id === current.id ? completed : s)),
+          }));
+          setPomodoroPhase(null);
+          setPomodoroTarget(null);
+          setGraceEnd(null);
+          return null;
+        });
+      }
+    } else if (phase === "break") {
+      pomodoroNotify("Break over — ready for the next pomodoro?", "info");
+      setActiveSession((current) => {
+        if (!current) return null;
+        const now = Date.now();
+        const totalDuration = now - current.start;
+        const completed = {
+          ...current,
+          end: now,
+          duration: totalDuration,
+          totalWorkTime: 0,
+          totalBreakTime: totalDuration,
+          pauses: [],
+          status: "completed",
+        };
+        setData((d) => ({
+          ...d,
+          sessions: d.sessions.map((s) => (s.id === current.id ? completed : s)),
+        }));
+        setPomodoroPhase(null);
+        setPomodoroTarget(null);
+        setGraceEnd(null);
+        return null;
+      });
+    }
+  }, [pomodoroNotify, transitionPomodoroPhase]);
+
+  // --- Skip current break (end break session, go to prompt for next work) ---
+  // eslint-disable-next-line no-unused-vars
+  const skipBreak = useCallback(() => {
+    if (pomodoroPhaseRef.current !== "break" && pomodoroPhaseRef.current !== "grace") return;
+
+    if (pomodoroPhaseRef.current === "grace") {
+      setGraceEnd(null);
+      setPomodoroPhase(null);
+      setPomodoroTarget(null);
+      return;
+    }
+
+    setActiveSession((current) => {
+      if (!current) return null;
+      const now = Date.now();
+      const totalDuration = now - current.start;
+      const completed = {
+        ...current,
+        end: now,
+        duration: totalDuration,
+        totalWorkTime: 0,
+        totalBreakTime: totalDuration,
+        pauses: [],
+        status: "completed",
+      };
+      setData((d) => ({
+        ...d,
+        sessions: d.sessions.map((s) => (s.id === current.id ? completed : s)),
+      }));
+      setPomodoroPhase(null);
+      setPomodoroTarget(null);
+      setGraceEnd(null);
+      return null;
+    });
+  }, []);
+
+  // --- Extend current work interval by 5 minutes ---
+  // eslint-disable-next-line no-unused-vars
+  const extendWork = useCallback(() => {
+    if (pomodoroPhaseRef.current !== "work") return;
+    setPomodoroTarget((prev) => (prev ? prev + 5 * 60000 : null));
+  }, []);
+
+  // --- Pomodoro cleanup: reset phase when active session is cleared ---
+  useEffect(() => {
+    if (!activeSession && pomodoroPhaseRef.current) {
+      setPomodoroPhase(null);
+      setPomodoroTarget(null);
+      setGraceEnd(null);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSession]);
+
   const startSession = (type = "work", tags = [], notes = "") => {
     // Auto-close any existing running/paused session before starting a new one
     const existing = (dataRef.current.sessions || []).find(
