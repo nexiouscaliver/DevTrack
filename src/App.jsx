@@ -5308,6 +5308,94 @@ function SettingsModal({ open, onClose, data, updateSettings, showToast, onReset
             />
           </div>
 
+          {/* Pomodoro Timer Settings */}
+          <div className="border-t border-stone-800 pt-4">
+            <label className="text-xs text-stone-400 uppercase tracking-wide">
+              Pomodoro Timer
+            </label>
+            <div className="mt-3 grid grid-cols-2 gap-3">
+              <div>
+                <label className="text-[11px] text-stone-500">Work Interval (min)</label>
+                <input
+                  type="number"
+                  min="1"
+                  max="120"
+                  value={form.pomodoro?.workInterval ?? 25}
+                  onChange={(e) =>
+                    setForm({
+                      ...form,
+                      pomodoro: { ...form.pomodoro, workInterval: Math.max(1, Math.min(120, +e.target.value || 1)) },
+                    })
+                  }
+                  onBlur={(e) => {
+                    const v = Math.max(1, Math.min(120, +e.target.value || 25));
+                    setForm({ ...form, pomodoro: { ...form.pomodoro, workInterval: v } });
+                  }}
+                  className="w-full mt-1 px-3 py-1.5 bg-stone-800 border border-stone-700 rounded-lg text-sm"
+                />
+              </div>
+              <div>
+                <label className="text-[11px] text-stone-500">Break Interval (min)</label>
+                <input
+                  type="number"
+                  min="1"
+                  max="60"
+                  value={form.pomodoro?.breakInterval ?? 5}
+                  onChange={(e) =>
+                    setForm({
+                      ...form,
+                      pomodoro: { ...form.pomodoro, breakInterval: Math.max(1, Math.min(60, +e.target.value || 1)) },
+                    })
+                  }
+                  onBlur={(e) => {
+                    const v = Math.max(1, Math.min(60, +e.target.value || 5));
+                    setForm({ ...form, pomodoro: { ...form.pomodoro, breakInterval: v } });
+                  }}
+                  className="w-full mt-1 px-3 py-1.5 bg-stone-800 border border-stone-700 rounded-lg text-sm"
+                />
+              </div>
+            </div>
+            <div className="mt-3 space-y-2">
+              <label className="flex items-center gap-2 cursor-pointer text-sm">
+                <input
+                  type="checkbox"
+                  checked={form.pomodoro?.autoStartBreak ?? true}
+                  onChange={(e) =>
+                    setForm({
+                      ...form,
+                      pomodoro: { ...form.pomodoro, autoStartBreak: e.target.checked },
+                    })
+                  }
+                  className="rounded border-stone-600 bg-stone-800 text-amber-500 focus:ring-amber-500/20"
+                />
+                <span className="text-stone-300">Auto-start break</span>
+                <span className="text-[11px] text-stone-500">(30s grace period to skip)</span>
+              </label>
+              <label className="flex items-center gap-2 cursor-pointer text-sm">
+                <input
+                  type="checkbox"
+                  checked={form.pomodoro?.notifications ?? true}
+                  onChange={(e) => {
+                    const enabled = e.target.checked;
+                    setForm({
+                      ...form,
+                      pomodoro: { ...form.pomodoro, notifications: enabled },
+                    });
+                    if (enabled && typeof Notification !== "undefined" && Notification.permission === "default") {
+                      Notification.requestPermission().then((result) => {
+                        if (result === "denied") {
+                          showToast("Browser notifications blocked. Enable in browser settings.", "warning");
+                        }
+                      });
+                    }
+                  }}
+                  className="rounded border-stone-600 bg-stone-800 text-amber-500 focus:ring-amber-500/20"
+                />
+                <span className="text-stone-300">Browser notifications + sound</span>
+              </label>
+            </div>
+          </div>
+
           {/* Author Identity Management */}
           <div className="border-t border-stone-800 pt-4">
             <div className="flex items-center justify-between mb-2">
