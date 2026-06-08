@@ -39,9 +39,16 @@ if (existsSync(TMP_FILE)) {
 
 const run = promisify(exec);
 const app = express();
-const PORT = 9001;
+const PORT = parseInt(process.env.PORT, 10) || 9001;
+const BIND_ADDR = process.env.BIND_ADDR || "127.0.0.1";
+const DIST_DIR = join(__dirname, "..", "dist");
 
 app.use(express.json({ limit: "5mb" }));
+
+// --- Serve static frontend in production ---
+if (existsSync(DIST_DIR)) {
+  app.use(express.static(DIST_DIR));
+}
 
 // --- Data persistence helpers ---
 // Serialize writes to prevent concurrent POST interleaving
@@ -596,9 +603,27 @@ app.delete("/api/data/versions", (_req, res) => {
   }
 });
 
+// --- SPA fallback: serve index.html for all non-API GET requests ---
+// Uses middleware (not app.get("*")) because Express 5's path-to-regexp v8
+// requires named wildcards. Middleware placed after all API routes catches
+// only requests that fell through — same effect as a catch-all route.
+if (existsSync(DIST_DIR)) {
+  app.use((req, res) => {
+    res.sendFile(join(DIST_DIR, "index.html"), (err) => {
+      if (err) {
+        console.error("DevTrack: failed to serve SPA fallback:", err.message);
+        res.status(500).send("Failed to load application");
+      }
+    });
+  });
+}
+
 // --- Start server ---
-app.listen(PORT, "127.0.0.1", () => {
-  console.log(`DevTrack git server running on http://127.0.0.1:${PORT}`);
+app.listen(PORT, BIND_ADDR, () => {
+  console.log(`DevTrack server running on http://${BIND_ADDR}:${PORT}`);
+  if (existsSync(DIST_DIR)) {
+    console.log(`Serving static frontend from ${DIST_DIR}`);
+  }
 }).on("error", (err) => {
   if (err.code === "EADDRINUSE") {
     console.error(`Port ${PORT} is already in use. Is the git server already running?`);
