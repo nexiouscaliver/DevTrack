@@ -173,6 +173,18 @@ const ICONS = {
     </>
   ),
   zap: <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />,
+  devtrackLogo: (
+    <>
+      {/* Clock face ring */}
+      <circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" strokeWidth="1.5" opacity="0.2" />
+      {/* Hour hand — filled wedge pointing ~10 o'clock */}
+      <path d="M11 11L4 2L7.5 3.5L12.5 10Z" fill="currentColor" stroke="none" />
+      {/* Minute hand — filled wedge pointing ~2 o'clock */}
+      <path d="M13 11L20 2L16.5 3.5L11.5 10Z" fill="currentColor" stroke="none" />
+      {/* Center dot */}
+      <circle cx="12" cy="12" r="2.5" fill="currentColor" stroke="none" />
+    </>
+  ),
   trending: (
     <>
       <polyline points="23 6 13.5 15.5 8.5 10.5 1 18" />
@@ -2141,7 +2153,7 @@ export default function App() {
       <div className="md:hidden fixed top-0 left-0 right-0 z-40 bg-stone-900/95 backdrop-blur border-b border-stone-800 px-4 py-3 flex items-center justify-between">
         <div className="flex items-center gap-2">
           <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-amber-500 to-orange-600 flex items-center justify-center">
-            <Icon path={ICONS.zap} size={16} className="text-white" />
+            <img src="/logo.png" alt="DevTrack" className="w-7 h-7 object-contain" />
           </div>
           <span className="font-bold">DevTrack</span>
         </div>
@@ -2175,7 +2187,7 @@ export default function App() {
               <div className="flex items-center justify-between mb-8">
                 <div className="flex items-center gap-2">
                   <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-amber-500 to-orange-600 flex items-center justify-center shadow-lg shadow-amber-500/30">
-                    <Icon path={ICONS.zap} size={20} className="text-white" />
+                    <img src="/logo.png" alt="DevTrack" className="w-9 h-9 object-contain" />
                   </div>
                   <div>
                     <h1 className="font-bold text-lg leading-none">DevTrack</h1>
@@ -2241,7 +2253,7 @@ export default function App() {
       <aside className="hidden md:flex w-64 bg-stone-900/50 backdrop-blur border-r border-stone-800 p-5 flex-col sticky top-0 h-screen">
         <div className="flex items-center gap-2 mb-8">
           <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-amber-500 to-orange-600 flex items-center justify-center shadow-lg shadow-amber-500/30">
-            <Icon path={ICONS.zap} size={20} className="text-white" />
+            <img src="/logo.png" alt="DevTrack" className="w-9 h-9 object-contain" />
           </div>
           <div>
             <h1 className="font-bold text-lg leading-none">DevTrack</h1>
@@ -2498,7 +2510,7 @@ function Dashboard({
       <div className="max-w-7xl mx-auto">
         <div className="flex flex-col items-center justify-center py-24 text-center">
           <div className="w-20 h-20 rounded-2xl bg-gradient-to-br from-amber-500 to-orange-600 flex items-center justify-center shadow-lg shadow-amber-500/30 mb-6">
-            <Icon path={ICONS.zap} size={36} className="text-white" />
+            <img src="/logo.png" alt="DevTrack" className="w-[72px] h-[72px] object-contain" />
           </div>
           <h1 className="text-3xl font-bold mb-3">Welcome to DevTrack</h1>
           <p className="text-stone-400 max-w-md mb-8">
