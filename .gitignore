@@ -37,3 +37,5 @@ claudedocs/
 .playwright-mcp/
 timer-before.png
 .claude/
+# guildly agent workspace (linked project) — unstaged by default
+.guildly/
